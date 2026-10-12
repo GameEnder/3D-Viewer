@@ -1,0 +1,17 @@
+[package]
+name = "viewer-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe.workspace = true
+egui-wgpu.workspace = true
+viewer-scene.workspace = true
+viewer-render.workspace = true
+glam.workspace = true
+rfd.workspace = true
+image.workspace = true
+
+[[bin]]
+name = "viewer"
+path = "src/main.rs"

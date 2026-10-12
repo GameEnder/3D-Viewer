@@ -1,0 +1,11 @@
+[package]
+name = "viewer-scene"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glam.workspace = true
+thiserror.workspace = true
+gltf.workspace = true
+tobj.workspace = true
+image.workspace = true

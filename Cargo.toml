@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/viewer-scene", "crates/viewer-render", "crates/viewer-app"]
+
+[workspace.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+egui-wgpu = "0.36"
+glam = "0.30"
+gltf = "1"
+tobj = "4"
+image = "0.25"
+rfd = "0.15"
+thiserror = "2"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+viewer-scene = { path = "crates/viewer-scene" }
+viewer-render = { path = "crates/viewer-render" }

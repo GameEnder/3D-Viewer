@@ -1,0 +1,12 @@
+[package]
+name = "viewer-render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+egui-wgpu.workspace = true   # provides the wgpu 30 re-export; NO standalone wgpu dep
+viewer-scene.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+image.workspace = true
