@@ -1,15 +1,11 @@
 // crates/viewer-app/src/camera.rs
 use glam::{Mat4, Vec3};
 
-#[allow(dead_code)]
 pub const DEFAULT_ELEVATION_DEG: f32 = 15.0;
-#[allow(dead_code)]
 pub const DEFAULT_ROTATION_DEG: f32 = -90.0;
-#[allow(dead_code)]
 pub const DEFAULT_FOV_DEG: f32 = 45.0;
 
 /// Spherical orbit camera matching the original's (distance, elevation, rotation) model.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct OrbitCamera {
     pub target: Vec3,
@@ -19,7 +15,6 @@ pub struct OrbitCamera {
     pub fov_y_deg: f32,
 }
 
-#[allow(dead_code)]
 impl OrbitCamera {
     pub fn fit(&mut self, center: Vec3, radius: f32) {
         self.target = center;
@@ -69,6 +64,7 @@ impl OrbitCamera {
         self.distance = (self.distance / mult.max(0.01)).clamp(0.4, 30.0);
     }
 
+    #[allow(dead_code)] // unwired until Task 8+ adds pan input
     pub fn pan(&mut self, dx: f32, dy: f32, aspect: f32) {
         let scale = self.distance * (self.fov_y_deg.to_radians() * 0.5).tan() / 500.0;
         let view = self.view_matrix();
