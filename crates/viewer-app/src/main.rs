@@ -1,5 +1,6 @@
 // crates/viewer-app/src/main.rs
 mod app;
+mod camera;
 mod paint;
 
 fn main() -> eframe::Result<()> {
