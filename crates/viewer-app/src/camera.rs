@@ -101,7 +101,7 @@ mod tests {
         assert!(clip.w > 0.0);
         assert!((clip.x / clip.w).abs() < 1e-5);
         assert!((clip.y / clip.w).abs() < 1e-5);
-        assert!(clip.z / clip.w > 0.0 && clip.z / clip.w < 1.0); // standard 0..1 depth
+        assert!(clip.z / clip.w > 0.0 && clip.z / clip.w < 1.0); // inside clip volume; depth range itself is pinned by depth_range_is_0_to_1
     }
 
     #[test]
@@ -112,5 +112,22 @@ mod tests {
         assert!(c.distance > before * 0.5); // clamped, not collapsed
         c.dolly(100.0);
         assert!(c.distance < 50.0);
+    }
+
+    #[test]
+    fn depth_range_is_0_to_1() {
+        let c = OrbitCamera::default_for(Vec3::ZERO, 1.0);
+        let vp = Mat4::from_cols_array_2d(&c.view_proj(16.0 / 9.0));
+        let fwd = (c.target - c.eye()).normalize();
+        // Just inside the frustum (0.06 from eye, near = 0.05): perspective_rh (0..1)
+        // gives z_ndc ≈ +0.167; a GL −1..1 projection (perspective_rh_gl) would give
+        // ≈ −0.667, so the sign here discriminates the two conventions.
+        let inside = vp * (c.eye() + fwd * 0.06).extend(1.0);
+        assert!(inside.z / inside.w > 0.0);
+        assert!(inside.z / inside.w < 1.0);
+        // Just in front of the near plane (0.04 from eye, clipped): z_ndc ≈ −0.250 under
+        // 0..1 (GL would give ≈ −1.500); the frustum boundary sits at z_ndc = 0, not −1.
+        let outside = vp * (c.eye() + fwd * 0.04).extend(1.0);
+        assert!(outside.z / outside.w < 0.0);
     }
 }
