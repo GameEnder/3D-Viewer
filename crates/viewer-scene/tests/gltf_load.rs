@@ -179,3 +179,18 @@ fn loads_cubic_spline_animation() {
     assert_eq!(keys.in_tangents.len(), 2);
     assert_eq!(keys.out_tangents.len(), 2);
 }
+
+#[test]
+fn animation_channel_targets_the_created_node() {
+    // Regression (Task 17 smoke finding): the glTF loader's node map stored
+    // the BFS position, but created nodes land at 1 + position (the
+    // synthetic root occupies scene slot 0). Channels then targeted the
+    // wrong node — here the root, whose TRS normalize() overwrites, so a
+    // playing animation would collapse the model instead of rotating the
+    // cube node.
+    let path = write_temp("cube_probe.glb", &build_cube_glb(true));
+    let scene = viewer_scene::load(&path).unwrap();
+    assert_eq!(scene.nodes.len(), 2);
+    assert_eq!(scene.nodes[1].name.as_deref(), Some("cube"));
+    assert_eq!(scene.animations[0].channels[0].node, 1);
+}

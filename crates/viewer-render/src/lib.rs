@@ -1064,12 +1064,22 @@ impl Renderer {
         };
 
         if let Some(gs) = self.gpu_scene.as_ref() {
+            // Task 17: animation overrides — evaluate the requested clip at
+            // the app's playback time; `anim = None` or an out-of-range clip
+            // renders the static pose (empty overrides).
+            let overrides = match params.anim {
+                Some((clip, time)) if clip < gs.scene.animations.len() => {
+                    viewer_scene::evaluate(&gs.scene, clip, time)
+                }
+                _ => Vec::new(),
+            };
             // Per-draw model uniforms: world transform * turntable spin and
             // uniform scale, both around the bounds center (the two compose
             // either way — uniform scaling commutes with rotation). Scale is
             // folded CPU-side per the Task 13 controller ruling (no uniform
-            // change). Animation overrides arrive in Task 17.
-            let world = viewer_scene::world_transforms(&gs.scene, &[]);
+            // change); the turntable stays the root post-rotation on top of
+            // the animated node transforms.
+            let world = viewer_scene::world_transforms(&gs.scene, &overrides);
             let center = gs.scene.bounds.center();
             let spin = if params.turntable_deg != 0.0 {
                 Mat4::from_translation(center)

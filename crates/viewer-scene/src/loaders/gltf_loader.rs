@@ -47,7 +47,7 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
         if map[i].is_some() {
             continue;
         }
-        map[i] = Some(order.len());
+        map[i] = Some(order.len()); // BFS position — dedupe marker only
         let children: Vec<_> = n.children().collect();
         order.push(n);
         queue.extend(children);
@@ -61,6 +61,13 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
             scale: Vec3::from(s),
         };
         let idx = scene.add_node(scene.root, trs, node.name().map(str::to_owned));
+        // Overwrite the BFS-position dedupe marker with our TRUE scene
+        // index: the synthetic root occupies slot 0, so created nodes start
+        // at 1. Animation channels and hierarchy reparenting resolve through
+        // this map (Task 17 regression: the BFS position pointed one node
+        // too early — a playing channel then replaced the root's normalize
+        // TRS instead of animating its node).
+        map[node.index()] = Some(idx);
         // attach meshes (one per primitive)
         if let Some(mesh) = node.mesh() {
             for prim in mesh.primitives() {

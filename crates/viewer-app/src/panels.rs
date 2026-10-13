@@ -83,6 +83,94 @@ pub fn toolbar(
     out
 }
 
+/// App-side animation playback state (Task 17). The bar writes it; the app
+/// advances `time` each frame and feeds `(clip, time)` into
+/// `FrameParams.anim`. Defaults: clip 0, paused, t = 0, speed 1.0.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimationState {
+    pub clip: usize,
+    pub playing: bool,
+    pub time: f32,
+    /// Playback rate multiplier (bar drag, 0.1..4, default 1.0).
+    pub speed: f32,
+}
+
+impl Default for AnimationState {
+    fn default() -> Self {
+        Self {
+            clip: 0,
+            playing: false,
+            time: 0.0,
+            speed: 1.0,
+        }
+    }
+}
+
+/// The bottom animation bar (Task 17), shown only while a scene WITH
+/// animations is loaded: clip picker, Play/Pause, a scrub slider that writes
+/// `time` directly (playing state untouched) and the speed drag. Switching
+/// clips restarts playback at t = 0.
+pub fn animation_bar(
+    ui: &mut egui::Ui,
+    anim: &mut AnimationState,
+    animations: &[viewer_scene::Animation],
+) {
+    if animations.is_empty() {
+        return;
+    }
+    egui::Panel::bottom("animation_bar")
+        .resizable(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Defensive clip clamp (the app resets state per load, so the
+                // clip is in range; a stale index must not panic here).
+                let clip = anim.clip.min(animations.len() - 1);
+                let clip_label = |i: usize| {
+                    let name = &animations[i].name;
+                    if name.is_empty() {
+                        format!("Clip {}", i + 1)
+                    } else {
+                        name.clone()
+                    }
+                };
+                let prev = anim.clip;
+                egui::ComboBox::from_id_salt("animation_clip")
+                    .selected_text(clip_label(clip))
+                    .show_ui(ui, |ui| {
+                        for i in 0..animations.len() {
+                            ui.selectable_value(&mut anim.clip, i, clip_label(i));
+                        }
+                    });
+                if anim.clip != prev {
+                    anim.time = 0.0;
+                }
+                let label = if anim.playing { "Pause" } else { "Play" };
+                if ui
+                    .add_sized(
+                        [56.0, 22.0],
+                        egui::Button::new(egui::RichText::new(label).small()),
+                    )
+                    .clicked()
+                {
+                    anim.playing = !anim.playing;
+                }
+                let dur = animations[clip].duration.max(0.0);
+                let range = if dur > 0.0 { 0.0..=dur } else { 0.0..=1.0 };
+                ui.add(
+                    egui::Slider::new(&mut anim.time, range)
+                        .text("t")
+                        .show_value(true),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut anim.speed)
+                        .range(0.1..=4.0)
+                        .speed(0.01)
+                        .prefix("x"),
+                );
+            });
+        });
+}
+
 /// egui 0.36 has no builtin toggle button (brief note): a plain button whose
 /// fill marks the selected state. Returns the new state (flipped on click).
 fn toggle_button(ui: &mut egui::Ui, text: &str, on: bool, width: f32) -> bool {
@@ -281,6 +369,61 @@ fn camera_section(ui: &mut egui::Ui, c: CameraSection<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bottom animation bar paints widgets in the bottom strip only when
+    /// it is called (the app shows it only for scenes WITH animations), and
+    /// the Play/Pause label follows the state (different glyph counts).
+    #[test]
+    fn animation_bar_paints_widgets_in_the_bottom_strip() {
+        let animations = vec![viewer_scene::Animation {
+            name: "spin".into(),
+            duration: 1.0,
+            channels: vec![],
+        }];
+        let paint = |show: bool, playing: bool| -> usize {
+            let ctx = egui::Context::default();
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+            let input = egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            };
+            let mut anim = AnimationState {
+                playing,
+                ..AnimationState::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                if show {
+                    animation_bar(ui, &mut anim, &animations);
+                }
+            });
+            let mut textures_delta = out.textures_delta;
+            textures_delta.clear();
+            let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+            let mut count = 0;
+            for p in &prims {
+                if let egui::epaint::Primitive::Mesh(mesh) = &p.primitive {
+                    for v in &mesh.vertices {
+                        if v.pos.y > 700.0 {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        };
+        let baseline = paint(false, false);
+        let shown_paused = paint(true, false);
+        let shown_playing = paint(true, true);
+        assert_eq!(baseline, 0, "without the bar the bottom strip stays empty");
+        assert!(
+            shown_paused > 20,
+            "the bar must paint its widgets at the bottom, got {shown_paused}"
+        );
+        assert_ne!(
+            shown_paused, shown_playing,
+            "Play/Pause labels must follow the playing state"
+        );
+    }
 
     /// Tessellates one overlay in a headless egui context and counts mesh
     /// vertices landing inside `region` — proof the widget actually paints

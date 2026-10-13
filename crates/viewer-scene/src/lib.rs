@@ -1,4 +1,5 @@
 pub mod aabb;
+pub mod anim_eval;
 pub mod animation;
 pub mod error;
 pub mod loaders;
@@ -6,6 +7,7 @@ pub mod normalize;
 pub mod scene;
 
 pub use aabb::Aabb;
+pub use anim_eval::evaluate;
 pub use animation::{Animation, Channel, Interpolation, Keyframes, TrsProperty};
 pub use error::LoadError;
 pub use normalize::{compute_normals, normalize, world_transforms};

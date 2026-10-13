@@ -65,6 +65,9 @@ pub struct ViewerApp {
     contrast: f32,
     /// Whether the right settings panel is shown (toolbar toggle).
     settings_open: bool,
+    /// Animation playback state (Task 17): the bar writes it, `step_animation`
+    /// advances it, `frame_params` feeds `(clip, time)` to the renderer.
+    anim: panels::AnimationState,
 }
 
 impl ViewerApp {
@@ -100,6 +103,7 @@ impl ViewerApp {
             exposure: 0.5,
             contrast: 1.66,
             settings_open: true,
+            anim: panels::AnimationState::default(),
         }
     }
 
@@ -121,6 +125,15 @@ impl ViewerApp {
 
     fn frame_params(&self, aspect: f32) -> FrameParams {
         let (lights, env_color, env_intensity) = self.themed_lights();
+        // Task 17: feed the selected clip + playback time to the renderer
+        // whenever a scene with animations is Ready and the clip is in range
+        // (a stale/out-of-range clip renders the static pose instead).
+        let anim = match &self.state {
+            AppState::Ready(scene) if self.anim.clip < scene.animations.len() => {
+                Some((self.anim.clip, self.anim.time))
+            }
+            _ => None,
+        };
         FrameParams {
             view_proj: self.camera.view_proj(aspect),
             camera_pos: self.camera.eye().to_array(),
@@ -140,7 +153,7 @@ impl ViewerApp {
                 contrast: self.contrast,
                 ground_opacity: 0.4,
             },
-            anim: None,
+            anim,
         }
     }
 
@@ -165,6 +178,47 @@ impl ViewerApp {
         }
         let dt = ctx.input(|i| i.unstable_dt);
         self.step_turntable(dt);
+        ctx.request_repaint();
+    }
+
+    /// Duration of the selected animation clip (Task 17). `None` without a
+    /// Ready scene or with an out-of-range clip.
+    fn animation_duration(&self) -> Option<f32> {
+        match &self.state {
+            AppState::Ready(scene) => scene.animations.get(self.anim.clip).map(|a| a.duration),
+            _ => None,
+        }
+    }
+
+    /// Advances animation playback (Task 17): `time += speed * dt` while
+    /// playing, wrapping at the clip duration so the scrub slider stays in
+    /// range (the renderer wraps again via `evaluate`'s `rem_euclid`). dt is
+    /// clamped to 0.1 s like the turntable so a stalled frame cannot jump
+    /// the pose. Paused or clipless: no-op.
+    fn step_animation(&mut self, dt_seconds: f32) {
+        if !self.anim.playing {
+            return;
+        }
+        let Some(duration) = self.animation_duration() else {
+            return;
+        };
+        if duration <= 0.0 {
+            return;
+        }
+        let dt = dt_seconds.min(0.1);
+        self.anim.time = (self.anim.time + self.anim.speed * dt).rem_euclid(duration);
+    }
+
+    /// Per-frame animation update (Task 17): reads dt from the egui input
+    /// state (`unstable_dt`, present in egui 0.36) and keeps repainting while
+    /// playing (the app repaints continuously while Ready anyway; the
+    /// explicit request keeps playback alive if that ever changes).
+    fn advance_animation(&mut self, ctx: &egui::Context) {
+        if !self.anim.playing {
+            return;
+        }
+        let dt = ctx.input(|i| i.unstable_dt);
+        self.step_animation(dt);
         ctx.request_repaint();
     }
 
@@ -193,6 +247,9 @@ impl ViewerApp {
             Ok(scene) => {
                 self.camera
                     .fit(scene.bounds.center(), scene.bounds.bounding_sphere_radius());
+                // Task 17: every load restarts animation playback from clip
+                // 0, paused (a stale clip index would point nowhere).
+                self.anim = panels::AnimationState::default();
                 let arc = Arc::new(scene);
                 if let Some(rs) = self.render_state.as_ref() {
                     // parking_lot guard: read() cannot fail, so no expect.
@@ -278,6 +335,9 @@ impl eframe::App for ViewerApp {
         // Turntable spin (Task 13): advance + keep repainting while on.
         self.advance_turntable(ui.ctx());
 
+        // Animation playback (Task 17): advance + keep repainting while on.
+        self.advance_animation(ui.ctx());
+
         // Left toolbar (Task 12): Open / Turntable / Screenshot / Settings.
         // The Settings toggle gates the right settings panel; both panels run
         // before the CentralPanel so the viewport shrinks this same frame.
@@ -317,6 +377,16 @@ impl eframe::App for ViewerApp {
                     reset_view: &mut reset_view,
                 },
             );
+        }
+
+        // Bottom animation bar (Task 17): only for a scene WITH animations.
+        // Shown before the CentralPanel so the viewport shrinks this frame.
+        let animations: &[viewer_scene::Animation] = match &self.state {
+            AppState::Ready(scene) => &scene.animations,
+            _ => &[],
+        };
+        if !animations.is_empty() {
+            panels::animation_bar(ui, &mut self.anim, animations);
         }
 
         // Toolbar side effects: the Open request reuses open_path (worker
@@ -472,7 +542,83 @@ mod tests {
             exposure: 0.5,
             contrast: 1.66,
             settings_open: true,
+            anim: panels::AnimationState::default(),
         }
+    }
+
+    /// A scene with one 2 s animation, as Ready app state (for the
+    /// animation-flow tests).
+    fn test_app_with_animation() -> ViewerApp {
+        let mut app = test_app();
+        let mut scene = viewer_scene::Scene::new("t".into());
+        scene.animations.push(viewer_scene::Animation {
+            name: "spin".into(),
+            duration: 2.0,
+            channels: vec![],
+        });
+        app.state = AppState::Ready(Arc::new(scene));
+        app
+    }
+
+    /// Task 17 defaults: clip 0, paused, t = 0, speed 1.0.
+    #[test]
+    fn animation_state_defaults_match_the_brief() {
+        let app = test_app();
+        assert_eq!(app.anim.clip, 0);
+        assert!(!app.anim.playing);
+        assert_eq!(app.anim.time, 0.0);
+        assert_eq!(app.anim.speed, 1.0);
+    }
+
+    /// Playback: `time += speed * dt` while playing (wrapping at the clip
+    /// duration), dt clamped to 0.1 s like the turntable, frozen while
+    /// paused, inert without a Ready scene.
+    #[test]
+    fn step_animation_advances_wraps_clamps_and_freezes() {
+        let mut app = test_app_with_animation();
+        app.anim.playing = true;
+        app.anim.time = 1.95;
+        app.step_animation(0.1);
+        assert!((app.anim.time - 0.05).abs() < 1e-5, "wraps at duration 2.0");
+        app.anim.speed = 2.0;
+        app.anim.time = 1.0;
+        app.step_animation(0.1);
+        assert!((app.anim.time - 1.2).abs() < 1e-5, "speed multiplies dt");
+        app.step_animation(5.0); // clamped: still only +0.2 s
+        assert!((app.anim.time - 1.4).abs() < 1e-5);
+        app.anim.playing = false;
+        app.step_animation(0.1);
+        assert!((app.anim.time - 1.4).abs() < 1e-5, "paused = frozen");
+        let mut idle = test_app();
+        idle.anim.playing = true;
+        idle.step_animation(0.1);
+        assert_eq!(idle.anim.time, 0.0, "no scene = inert");
+    }
+
+    /// The animation state reaches FrameParams: `Some((clip, time))` when a
+    /// scene with a valid clip is Ready, `None` otherwise (no scene, no
+    /// animations, or an out-of-range clip — the renderer then keeps the
+    /// static pose).
+    #[test]
+    fn animation_flows_into_frame_params() {
+        let mut app = test_app_with_animation();
+        app.anim.clip = 0;
+        app.anim.time = 0.75;
+        let p = app.frame_params(1.6);
+        assert_eq!(p.anim, Some((0, 0.75)));
+
+        app.anim.clip = 1; // out of range
+        assert_eq!(app.frame_params(1.6).anim, None);
+
+        assert_eq!(test_app().frame_params(1.6).anim, None, "no scene");
+
+        let mut empty = test_app();
+        empty.state = AppState::Ready(Arc::new(viewer_scene::Scene::new("e".into())));
+        assert_eq!(
+            empty.frame_params(1.6).anim,
+            None,
+            "scene without animations"
+        );
     }
 
     /// Defaults match the original app: ground disc + grid visible, bloom on
