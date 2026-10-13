@@ -1,6 +1,7 @@
 // crates/viewer-scene/src/loaders/mod.rs
 pub mod gltf_loader;
 pub mod obj_loader;
+pub mod stl_loader;
 
 use crate::error::LoadError;
 use crate::scene::Scene;
@@ -13,11 +14,7 @@ pub fn load(path: &std::path::Path) -> Result<Scene, LoadError> {
     let mut scene = match ext.as_deref() {
         Some("glb") | Some("gltf") => gltf_loader::load(path)?,
         Some("obj") => obj_loader::load(path)?,
-        Some("stl") => {
-            return Err(LoadError::UnsupportedFormat(
-                "STL (arrives in Task 15)".into(),
-            ));
-        }
+        Some("stl") => stl_loader::load(path)?,
         Some("ply") => {
             return Err(LoadError::UnsupportedFormat(
                 "PLY (arrives in Task 16)".into(),
