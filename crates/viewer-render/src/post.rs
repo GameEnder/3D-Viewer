@@ -114,10 +114,12 @@ impl Bloom {
 
     /// (Re)creates the half-res chain. `width`/`height` are the chain's own
     /// size (half the final target, min 1) — the caller computes them.
+    /// `sampler` must be the ClampToEdge `bloom_sampler`: the blur taps sample
+    /// up to 4 texels outside [0,1] and must clamp at the border, not wrap.
     pub fn resize(
         &mut self,
         device: &wgpu::Device,
-        lin_sampler: &wgpu::Sampler,
+        sampler: &wgpu::Sampler,
         hdr_view: &wgpu::TextureView,
         width: u32,
         height: u32,
@@ -193,7 +195,7 @@ impl Bloom {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(lin_sampler),
+                        resource: wgpu::BindingResource::Sampler(sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,

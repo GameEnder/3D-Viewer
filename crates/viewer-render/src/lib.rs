@@ -201,6 +201,10 @@ pub struct Renderer {
     bloom: post::Bloom,
     blit_bg: Option<wgpu::BindGroup>,
     lin_sampler: wgpu::Sampler,
+    /// ClampToEdge sampler for the bloom chain bind groups and the post pass
+    /// (blur taps reach beyond [0,1]; glTF material sampling keeps the shared
+    /// Repeat `lin_sampler`).
+    bloom_sampler: wgpu::Sampler,
     targets: Option<FrameTargets>,
     size: (u32, u32),
     gpu_scene: Option<gpu_scene::GpuScene>,
@@ -637,6 +641,23 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        // Screen-space sampler for the bloom chain + post pass (fix round 1):
+        // the blur taps sample uv ± i·texel, up to 4 texels outside [0,1] —
+        // with the shared Repeat sampler, bright content at a viewport edge
+        // would wrap its glow tail to the OPPOSITE edge (mirrored fringe) and
+        // read the wrong texels beyond the edge. ClampToEdge keeps the tail
+        // clamped at the border. glTF material sampling (pbr/ground) keeps the
+        // shared Repeat sampler per glTF wrap semantics.
+        let bloom_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("bloom_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         let shadow_cmp = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow_cmp"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -728,7 +749,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&lin_sampler),
+                    resource: wgpu::BindingResource::Sampler(&bloom_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -763,6 +784,7 @@ impl Renderer {
             post_bg_empty,
             blit_bg: None,
             lin_sampler,
+            bloom_sampler,
             targets: None,
             size: (0, 0),
             gpu_scene: None,
@@ -883,7 +905,7 @@ impl Renderer {
         let bw = (width / 2).max(1);
         let bh = (height / 2).max(1);
         self.bloom
-            .resize(device, &self.lin_sampler, &hdr_view, bw, bh);
+            .resize(device, &self.bloom_sampler, &hdr_view, bw, bh);
 
         // Rebuild the bind groups that reference the resized textures. The
         // bloom-off group keeps the 1x1 dummy in the bloom slot (never
@@ -1423,7 +1445,12 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.lin_sampler),
+                    // post.wgsl uses one sampler for scene_tex AND bloom_tex;
+                    // both are screen-space (fullscreen-triangle uv never
+                    // crosses the border in practice), so the ClampToEdge
+                    // sampler is strictly more correct here. glTF Repeat
+                    // semantics live in material_bgl, untouched.
+                    resource: wgpu::BindingResource::Sampler(&self.bloom_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
