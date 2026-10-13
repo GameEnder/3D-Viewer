@@ -44,8 +44,25 @@ pub struct ViewerApp {
     ground: bool,
     grid: bool,
     bloom: bool,
-    /// Turntable rotation toggle (toolbar): consumed by Task 13.
+    /// Turntable rotation toggle (toolbar): advances `turntable_deg` each
+    /// frame while on (Task 13).
     turntable: bool,
+    /// Accumulated turntable rotation in degrees (mod 360), advanced by
+    /// `turntable_speed` while the toggle is on (Task 13).
+    turntable_deg: f32,
+    /// Turntable rate in deg/s (Model panel slider 0..90). 30 deg/s ≈ 12 s
+    /// per revolution (the original's exact rate was never extracted).
+    turntable_speed: f32,
+    /// Static rotation offset in degrees (Model panel slider 0..360); added
+    /// to `turntable_deg` before reaching the renderer.
+    rot_offset_deg: f32,
+    /// Uniform model scale (Model panel slider 0.1..10); the renderer folds
+    /// it into the per-draw model matrices about the bounds center.
+    model_scale: f32,
+    /// Post-chain exposure (Camera panel slider −3..3 → RenderSettings).
+    exposure: f32,
+    /// Post-chain contrast (Camera panel slider 0.2..3 → RenderSettings).
+    contrast: f32,
     /// Whether the right settings panel is shown (toolbar toggle).
     settings_open: bool,
 }
@@ -76,6 +93,12 @@ impl ViewerApp {
             grid: true,
             bloom: true,
             turntable: false,
+            turntable_deg: 0.0,
+            turntable_speed: 30.0,
+            rot_offset_deg: 0.0,
+            model_scale: 1.0,
+            exposure: 0.5,
+            contrast: 1.66,
             settings_open: true,
         }
     }
@@ -101,7 +124,8 @@ impl ViewerApp {
         FrameParams {
             view_proj: self.camera.view_proj(aspect),
             camera_pos: self.camera.eye().to_array(),
-            turntable_deg: 0.0,
+            turntable_deg: (self.turntable_deg + self.rot_offset_deg) % 360.0,
+            model_scale: self.model_scale,
             lights,
             env_color,
             env_intensity,
@@ -112,12 +136,36 @@ impl ViewerApp {
                 grid: self.grid,
                 bloom: self.bloom,
                 shadows: true,
-                exposure: 0.5,
-                contrast: 1.66,
+                exposure: self.exposure,
+                contrast: self.contrast,
                 ground_opacity: 0.4,
             },
             anim: None,
         }
+    }
+
+    /// Advances the turntable rotation while the toolbar toggle is on
+    /// (Task 13): `turntable_speed` deg/s accumulated mod 360. `dt` is
+    /// clamped to 0.1 s so a stalled frame (first frame, window drag,
+    /// debugger halt) cannot jump the rotation.
+    fn step_turntable(&mut self, dt_seconds: f32) {
+        if !self.turntable {
+            return;
+        }
+        let dt = dt_seconds.min(0.1);
+        self.turntable_deg = (self.turntable_deg + self.turntable_speed * dt) % 360.0;
+    }
+
+    /// Per-frame turntable update: reads dt from the egui input state
+    /// (`unstable_dt`, present in egui 0.36) and keeps repainting while the
+    /// toggle is on.
+    fn advance_turntable(&mut self, ctx: &egui::Context) {
+        if !self.turntable {
+            return;
+        }
+        let dt = ctx.input(|i| i.unstable_dt);
+        self.step_turntable(dt);
+        ctx.request_repaint();
     }
 
     /// Spawns the worker thread that loads `path` and switches to Loading.
@@ -209,11 +257,41 @@ impl eframe::App for ViewerApp {
             .expect("renderer created above")
             .clone();
 
+        // Task 13 screenshot completion: the previous frame's prepare phase
+        // turned a pending request into a staging copy (the paint callback
+        // runs after ui() returns), so collect it here and, when present,
+        // save it as PNG through the native save dialog. The device.poll
+        // wait + dialog only block the UI thread right after the user asked
+        // for a screenshot.
+        if let Some(img) = renderer
+            .lock()
+            .expect("renderer mutex")
+            .collect_screenshot(&state.device)
+            && let Some(path) = rfd::FileDialog::new()
+                .set_file_name("screenshot.png")
+                .add_filter("PNG", &["png"])
+                .save_file()
+        {
+            let _ = img.save(&path);
+        }
+
+        // Turntable spin (Task 13): advance + keep repainting while on.
+        self.advance_turntable(ui.ctx());
+
         // Left toolbar (Task 12): Open / Turntable / Screenshot / Settings.
         // The Settings toggle gates the right settings panel; both panels run
         // before the CentralPanel so the viewport shrinks this same frame.
         let toolbar = panels::toolbar(ui, &mut self.turntable, &mut self.settings_open);
+        let mut reset_view = false;
         if self.settings_open {
+            let (source_name, tri_count, vert_count) = match &self.state {
+                AppState::Ready(scene) => (
+                    Some(scene.source_name.as_str()),
+                    scene.tri_count,
+                    scene.vert_count,
+                ),
+                _ => (None, 0, 0),
+            };
             panels::settings_panel(
                 ui,
                 &mut self.theme_idx,
@@ -224,13 +302,28 @@ impl eframe::App for ViewerApp {
                 &mut self.ground,
                 &mut self.grid,
                 &mut self.bloom,
+                panels::ModelSection {
+                    source_name,
+                    tri_count,
+                    vert_count,
+                    turntable_speed: &mut self.turntable_speed,
+                    rot_offset_deg: &mut self.rot_offset_deg,
+                    model_scale: &mut self.model_scale,
+                },
+                panels::CameraSection {
+                    fov_y_deg: &mut self.camera.fov_y_deg,
+                    exposure: &mut self.exposure,
+                    contrast: &mut self.contrast,
+                    reset_view: &mut reset_view,
+                },
             );
         }
 
         // Toolbar side effects: the Open request reuses open_path (worker
         // thread + Loading state); Screenshot flips the renderer's pending
-        // flag with a brief lock (the frame-long guard is taken below; Task
-        // 13 collects the PNG). Without a renderer neither can run.
+        // flag with a brief lock (the frame's staging copy is created by the
+        // paint callback's prepare phase and collected at the top of the
+        // next ui() call). Without a renderer neither can run.
         if let Some(path) = toolbar.open {
             self.open_path(ui.ctx(), path);
         }
@@ -239,6 +332,10 @@ impl eframe::App for ViewerApp {
                 .lock()
                 .expect("renderer mutex")
                 .request_screenshot();
+            // The staging copy is made by THIS frame's paint callback; the
+            // next frame must run promptly to collect it and open the save
+            // dialog (an idle egui sleeps until the next input event).
+            ui.ctx().request_repaint();
         }
 
         let mut r = renderer.lock().expect("renderer mutex");
@@ -301,9 +398,6 @@ impl eframe::App for ViewerApp {
                 if let AppState::Failed(err) = &self.state {
                     panels::error_banner(ui, rect, err);
                 }
-                if let Some(path) = panels::open_button(ui, rect) {
-                    self.open_path(ui.ctx(), path);
-                }
             });
 
         if let Some((w, h)) = new_size {
@@ -318,7 +412,9 @@ impl eframe::App for ViewerApp {
         if dolly_mult != 1.0 {
             self.camera.dolly(dolly_mult);
         }
-        if reset {
+        // Double-click on the viewport AND the Camera panel's "Reset view"
+        // button share the same fit-reset (Task 13).
+        if reset || reset_view {
             match &self.state {
                 AppState::Ready(scene) => self
                     .camera
@@ -369,6 +465,12 @@ mod tests {
             grid: true,
             bloom: true,
             turntable: false,
+            turntable_deg: 0.0,
+            turntable_speed: 30.0,
+            rot_offset_deg: 0.0,
+            model_scale: 1.0,
+            exposure: 0.5,
+            contrast: 1.66,
             settings_open: true,
         }
     }
@@ -410,5 +512,56 @@ mod tests {
         assert!(!s.ground);
         assert!(!s.grid);
         assert!(!s.bloom);
+    }
+
+    /// Task 13 panel defaults: 30 deg/s turntable (12 s/rev), no rotation
+    /// offset, scale 1, FOV 45, exposure 0.5, contrast 1.66.
+    #[test]
+    fn turntable_and_camera_defaults_match_the_brief() {
+        let app = test_app();
+        assert_eq!(app.turntable_speed, 30.0);
+        assert_eq!(app.rot_offset_deg, 0.0);
+        assert_eq!(app.model_scale, 1.0);
+        assert_eq!(app.camera.fov_y_deg, 45.0);
+        assert_eq!(app.exposure, 0.5);
+        assert_eq!(app.contrast, 1.66);
+    }
+
+    /// Turntable advance: 30 deg/s, dt clamped to 0.1 s (a stalled frame
+    /// must not jump the rotation), wraps mod 360, frozen while off.
+    #[test]
+    fn turntable_advances_clamps_and_wraps() {
+        let mut app = test_app();
+        app.turntable = true;
+        app.step_turntable(0.1);
+        assert!((app.turntable_deg - 3.0).abs() < 1e-5);
+        app.step_turntable(1.0); // clamped: still only +3 deg
+        assert!((app.turntable_deg - 6.0).abs() < 1e-5);
+        app.turntable_deg = 359.0;
+        app.step_turntable(0.1);
+        assert!((app.turntable_deg - 2.0).abs() < 1e-5, "wraps mod 360");
+        app.turntable = false;
+        app.step_turntable(0.1);
+        assert!((app.turntable_deg - 2.0).abs() < 1e-5, "off = frozen");
+    }
+
+    /// The Model/Camera panel state must reach FrameParams: the rotation
+    /// offset adds to the accumulated turntable angle; scale and the post
+    /// tuning flow into settings; FOV lives on the camera itself.
+    #[test]
+    fn model_and_camera_state_flows_into_frame_params() {
+        let mut app = test_app();
+        app.turntable_deg = 100.0;
+        app.rot_offset_deg = 50.0;
+        app.model_scale = 2.5;
+        app.exposure = 1.0;
+        app.contrast = 2.0;
+        app.camera.fov_y_deg = 70.0;
+        let p = app.frame_params(1.6);
+        assert!((p.turntable_deg - 150.0).abs() < 1e-4);
+        assert!((p.model_scale - 2.5).abs() < 1e-6);
+        assert!((p.settings.exposure - 1.0).abs() < 1e-6);
+        assert!((p.settings.contrast - 2.0).abs() < 1e-6);
+        assert!((app.camera.fov_y_deg - 70.0).abs() < 1e-6);
     }
 }

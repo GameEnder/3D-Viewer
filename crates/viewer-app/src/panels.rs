@@ -1,29 +1,11 @@
 // crates/viewer-app/src/panels.rs
-//! Overlay widgets drawn on top of the 3D viewport (Task 8: Open button,
-//! loading spinner, load-error banner), the left vertical toolbar and the
-//! right settings panel (Task 12: the Lighting section from Task 11 plus the
-//! new Effects section).
+//! Overlay widgets drawn on top of the 3D viewport (Task 8: loading spinner,
+//! load-error banner), the left vertical toolbar and the right settings panel
+//! (Task 12: Lighting + Effects sections; Task 13 adds Model + Camera).
 
 use eframe::egui;
 
 use crate::themes::THEMES;
-
-/// Floating "Open" button in the viewport's top-left corner. Returns the
-/// picked path when the user completes the native file dialog (blocking
-/// while it is open).
-pub fn open_button(ui: &mut egui::Ui, viewport: egui::Rect) -> Option<std::path::PathBuf> {
-    let rect = egui::Rect::from_min_size(
-        viewport.left_top() + egui::vec2(8.0, 8.0),
-        egui::vec2(64.0, 28.0),
-    );
-    if ui.put(rect, egui::Button::new("Open")).clicked() {
-        rfd::FileDialog::new()
-            .add_filter("3D models", &["glb", "gltf", "obj", "stl", "ply", "3mf"])
-            .pick_file()
-    } else {
-        None
-    }
-}
 
 /// Spinner centered in the viewport while a model loads (brief Step 3).
 pub fn loading_spinner(ui: &mut egui::Ui, viewport: egui::Rect) {
@@ -118,11 +100,35 @@ fn toggle_button(ui: &mut egui::Ui, text: &str, on: bool, width: f32) -> bool {
     clicked != on
 }
 
-/// The right settings panel: the Lighting section (Task 11) and the Effects
-/// section (Task 12) share ONE panel — two stacked right panels would place
-/// the second to the left of the first, and the original app exposes both as
-/// sections of a single panel. Mutates the app state through the passed
-/// refs; `app.rs` reads the same fields when building `FrameParams`.
+/// The Camera section's editable refs (Task 13). `fov_y_deg` points straight
+/// into `OrbitCamera` (single source of truth — `camera.fit` restores the
+/// 45° default on reset); `reset_view` is raised for the app to apply, since
+/// the fit needs the scene bounds.
+pub struct CameraSection<'a> {
+    pub fov_y_deg: &'a mut f32,
+    pub exposure: &'a mut f32,
+    pub contrast: &'a mut f32,
+    pub reset_view: &'a mut bool,
+}
+
+/// The Model section's data + editable refs (Task 13). `source_name`/counts
+/// are read-only scene info (None/0 without a loaded scene — the section
+/// then shows a placeholder instead of panicking).
+pub struct ModelSection<'a> {
+    pub source_name: Option<&'a str>,
+    pub tri_count: u32,
+    pub vert_count: u32,
+    pub turntable_speed: &'a mut f32,
+    pub rot_offset_deg: &'a mut f32,
+    pub model_scale: &'a mut f32,
+}
+
+/// The right settings panel: Lighting (Task 11), Effects (Task 12), Model +
+/// Camera (Task 13) share ONE panel — two stacked right panels would place
+/// the second to the left of the first, and the original app exposes all of
+/// these as sections of a single panel. A vertical ScrollArea keeps every
+/// section reachable on short windows. Mutates the app state through the
+/// passed refs; `app.rs` reads the same fields when building `FrameParams`.
 #[allow(clippy::too_many_arguments)]
 pub fn settings_panel(
     ui: &mut egui::Ui,
@@ -134,13 +140,21 @@ pub fn settings_panel(
     ground: &mut bool,
     grid: &mut bool,
     bloom: &mut bool,
+    model: ModelSection<'_>,
+    camera: CameraSection<'_>,
 ) {
     egui::Panel::right("settings_panel")
         .resizable(false)
         .show(ui, |ui| {
-            lighting_section(ui, theme_idx, light_mult, env_mult, shadows_enabled);
-            ui.separator();
-            effects_section(ui, wireframe, ground, grid, bloom);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                lighting_section(ui, theme_idx, light_mult, env_mult, shadows_enabled);
+                ui.separator();
+                effects_section(ui, wireframe, ground, grid, bloom);
+                ui.separator();
+                model_section(ui, model);
+                ui.separator();
+                camera_section(ui, camera);
+            });
         });
 }
 
@@ -221,6 +235,49 @@ fn effects_section(
     ui.checkbox(bloom, "Bloom");
 }
 
+/// The Model section (Task 13): source file name + triangle/vertex counts
+/// (read-only scene info), then the turntable speed (0..90 deg/s, default
+/// 30 ≈ 12 s/rev — the original's exact rate was never extracted), the
+/// static rotation offset (0..360, added to the accumulated turntable
+/// angle) and the uniform model scale (0.1..10, applied by the renderer
+/// around the bounds center).
+fn model_section(ui: &mut egui::Ui, m: ModelSection<'_>) {
+    ui.heading("Model");
+    ui.add_space(4.0);
+    match m.source_name {
+        Some(name) => {
+            ui.horizontal(|ui| {
+                ui.label("File:");
+                ui.label(name);
+            });
+            ui.label(format!("Triangles: {}", m.tri_count));
+            ui.label(format!("Vertices: {}", m.vert_count));
+        }
+        None => {
+            ui.label("No model loaded");
+        }
+    }
+    ui.separator();
+    ui.add(egui::Slider::new(m.turntable_speed, 0.0..=90.0).text("Turntable speed"));
+    ui.add(egui::Slider::new(m.rot_offset_deg, 0.0..=360.0).text("Rotation offset"));
+    ui.add(egui::Slider::new(m.model_scale, 0.1..=10.0).text("Scale"));
+}
+
+/// The Camera section (Task 13): FOV (20..90, straight into the orbit
+/// camera), exposure (−3..3) and contrast (0.2..3) into `RenderSettings`,
+/// and a "Reset view" button that re-fits the camera to the scene bounds
+/// (applied by the app, which owns the bounds).
+fn camera_section(ui: &mut egui::Ui, c: CameraSection<'_>) {
+    ui.heading("Camera");
+    ui.add_space(4.0);
+    ui.add(egui::Slider::new(c.fov_y_deg, 20.0..=90.0).text("FOV"));
+    ui.add(egui::Slider::new(c.exposure, -3.0..=3.0).text("Exposure"));
+    ui.add(egui::Slider::new(c.contrast, 0.2..=3.0).text("Contrast"));
+    if ui.button("Reset view").clicked() {
+        *c.reset_view = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,26 +345,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_button_tessellates_at_top_left() {
-        let corner = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(90.0, 45.0));
-        let n = verts_near(open_button_probe, corner);
-        assert!(
-            n > 10,
-            "open button must paint at the top-left, got {n} vertices"
-        );
-    }
-
-    /// open_button opens a native dialog on click, which cannot run in a
-    /// test — paint the same rect with the same button for the check.
-    fn open_button_probe(ui: &mut egui::Ui, viewport: egui::Rect) {
-        let rect = egui::Rect::from_min_size(
-            viewport.left_top() + egui::vec2(8.0, 8.0),
-            egui::vec2(64.0, 28.0),
-        );
-        ui.put(rect, egui::Button::new("Open"));
-    }
-
     /// The settings panel must paint every theme swatch with its light-0
     /// color (the swatch IS the theme's visual identity) on the right side
     /// of the screen.
@@ -327,6 +364,8 @@ mod tests {
         let mut ground = true;
         let mut grid = true;
         let mut bloom = true;
+        let (mut speed, mut offset, mut scale) = (30.0f32, 0.0f32, 1.0f32);
+        let (mut fov, mut exposure, mut contrast, mut reset) = (45.0f32, 0.5f32, 1.66f32, false);
         let out = ctx.run_ui(input, |ui| {
             settings_panel(
                 ui,
@@ -338,6 +377,20 @@ mod tests {
                 &mut ground,
                 &mut grid,
                 &mut bloom,
+                ModelSection {
+                    source_name: Some("Bee.glb"),
+                    tri_count: 12,
+                    vert_count: 8,
+                    turntable_speed: &mut speed,
+                    rot_offset_deg: &mut offset,
+                    model_scale: &mut scale,
+                },
+                CameraSection {
+                    fov_y_deg: &mut fov,
+                    exposure: &mut exposure,
+                    contrast: &mut contrast,
+                    reset_view: &mut reset,
+                },
             );
         });
         let egui::FullOutput {
@@ -625,6 +678,9 @@ mod tests {
             let mut env_mult = 1.0f32;
             let mut shadows_enabled = true;
             let (mut wf, mut g, mut gr, mut b) = (all_on, all_on, all_on, all_on);
+            let (mut speed, mut offset, mut scale) = (30.0f32, 0.0f32, 1.0f32);
+            let (mut fov, mut exposure, mut contrast, mut reset) =
+                (45.0f32, 0.5f32, 1.66f32, false);
             let out = ctx.run_ui(input, |ui| {
                 settings_panel(
                     ui,
@@ -636,6 +692,20 @@ mod tests {
                     &mut g,
                     &mut gr,
                     &mut b,
+                    ModelSection {
+                        source_name: None,
+                        tri_count: 0,
+                        vert_count: 0,
+                        turntable_speed: &mut speed,
+                        rot_offset_deg: &mut offset,
+                        model_scale: &mut scale,
+                    },
+                    CameraSection {
+                        fov_y_deg: &mut fov,
+                        exposure: &mut exposure,
+                        contrast: &mut contrast,
+                        reset_view: &mut reset,
+                    },
                 );
             });
             let mut textures_delta = out.textures_delta;
@@ -659,5 +729,160 @@ mod tests {
             on > off,
             "checked boxes must paint the check glyph ({on} vs {off})"
         );
+    }
+
+    /// The Model section paints the scene's file name and tri/vert counts:
+    /// a panel run with scene info tessellates more right-side text than one
+    /// without (the placeholder "No model loaded" is shorter).
+    #[test]
+    fn model_section_paints_scene_info() {
+        let paint = |with_scene: bool| {
+            let ctx = egui::Context::default();
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+            let input = egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            };
+            let (mut speed, mut offset, mut scale) = (30.0f32, 0.0f32, 1.0f32);
+            let (mut fov, mut exposure, mut contrast, mut reset) =
+                (45.0f32, 0.5f32, 1.66f32, false);
+            let out = ctx.run_ui(input, |ui| {
+                settings_panel(
+                    ui,
+                    &mut 0usize,
+                    &mut [1.0f32; 3],
+                    &mut 1.0f32,
+                    &mut true,
+                    &mut false,
+                    &mut true,
+                    &mut true,
+                    &mut true,
+                    ModelSection {
+                        source_name: with_scene.then_some("spinning_teapot_with_lid.glb"),
+                        tri_count: 123_456,
+                        vert_count: 65_432,
+                        turntable_speed: &mut speed,
+                        rot_offset_deg: &mut offset,
+                        model_scale: &mut scale,
+                    },
+                    CameraSection {
+                        fov_y_deg: &mut fov,
+                        exposure: &mut exposure,
+                        contrast: &mut contrast,
+                        reset_view: &mut reset,
+                    },
+                );
+            });
+            let mut textures_delta = out.textures_delta;
+            textures_delta.clear();
+            let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+            let mut verts_right = 0;
+            for p in &prims {
+                if let egui::epaint::Primitive::Mesh(mesh) = &p.primitive {
+                    for v in &mesh.vertices {
+                        if v.pos.x > 640.0 {
+                            verts_right += 1;
+                        }
+                    }
+                }
+            }
+            verts_right
+        };
+        let with = paint(true);
+        let without = paint(false);
+        assert!(
+            with > without,
+            "scene info (name + counts) must paint in the Model section ({with} vs {without})"
+        );
+    }
+
+    /// Clicking the Camera section's "Reset view" button (real geometry from
+    /// the previous frame, on the right side) raises the reset flag.
+    #[test]
+    fn reset_view_button_click_raises_flag() {
+        let ctx = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let run = |events: Vec<egui::Event>, reset: &mut bool| -> Vec<egui::Rect> {
+            let input = egui::RawInput {
+                screen_rect: Some(viewport),
+                events,
+                ..Default::default()
+            };
+            let mut visuals = None;
+            let out = ctx.run_ui(input, |ui| {
+                visuals = Some(ui.visuals().clone());
+                settings_panel(
+                    ui,
+                    &mut 0usize,
+                    &mut [1.0f32; 3],
+                    &mut 1.0f32,
+                    &mut true,
+                    &mut false,
+                    &mut true,
+                    &mut true,
+                    &mut true,
+                    ModelSection {
+                        source_name: None,
+                        tri_count: 0,
+                        vert_count: 0,
+                        turntable_speed: &mut 30.0,
+                        rot_offset_deg: &mut 0.0,
+                        model_scale: &mut 1.0,
+                    },
+                    CameraSection {
+                        fov_y_deg: &mut 45.0,
+                        exposure: &mut 0.5,
+                        contrast: &mut 1.66,
+                        reset_view: reset,
+                    },
+                );
+            });
+            let mut textures_delta = out.textures_delta;
+            textures_delta.clear();
+            let inactive = visuals
+                .expect("run_ui closure executed")
+                .widgets
+                .inactive
+                .bg_fill;
+            button_rects(&out.shapes)
+                .into_iter()
+                .filter(|(r, c)| *c == inactive && r.left() > 640.0)
+                .map(|(r, _)| r)
+                .collect()
+        };
+
+        // Frame 1: locate the Reset view button — the bottom-most button-fill
+        // rect in the right-side panel (the sliders use different fills).
+        let rects = run(vec![], &mut false);
+        let target = rects
+            .iter()
+            .copied()
+            .max_by(|a, b| a.top().total_cmp(&b.top()))
+            .expect("Reset view button must paint");
+        let center = target.center();
+
+        // Frames 2/3: press + release -> the flag flips.
+        let press = vec![
+            egui::Event::PointerMoved(center),
+            egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        let release = vec![
+            egui::Event::PointerMoved(center),
+            egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        run(press, &mut false);
+        let mut reset = false;
+        run(release, &mut reset);
+        assert!(reset, "clicking Reset view must raise the reset flag");
     }
 }

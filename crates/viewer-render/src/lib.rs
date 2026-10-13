@@ -82,6 +82,10 @@ pub struct FrameParams {
     pub view_proj: [[f32; 4]; 4],
     pub camera_pos: [f32; 3],
     pub turntable_deg: f32,
+    /// Uniform model scale (Task 13), folded CPU-side into the per-draw model
+    /// matrices about the bounds center (no uniform change; the ground disc
+    /// is NOT part of the model and stays unscaled).
+    pub model_scale: f32,
     pub lights: [LightInput; 3],
     pub env_color: [f32; 3],
     pub env_intensity: f32,
@@ -1060,8 +1064,11 @@ impl Renderer {
         };
 
         if let Some(gs) = self.gpu_scene.as_ref() {
-            // Per-draw model uniforms: world transform * turntable spin around
-            // the bounds center. Animation overrides arrive in Task 17.
+            // Per-draw model uniforms: world transform * turntable spin and
+            // uniform scale, both around the bounds center (the two compose
+            // either way — uniform scaling commutes with rotation). Scale is
+            // folded CPU-side per the Task 13 controller ruling (no uniform
+            // change). Animation overrides arrive in Task 17.
             let world = viewer_scene::world_transforms(&gs.scene, &[]);
             let center = gs.scene.bounds.center();
             let spin = if params.turntable_deg != 0.0 {
@@ -1071,8 +1078,16 @@ impl Renderer {
             } else {
                 Mat4::IDENTITY
             };
+            let scale = if params.model_scale != 1.0 {
+                Mat4::from_translation(center)
+                    * Mat4::from_scale(Vec3::splat(params.model_scale))
+                    * Mat4::from_translation(-center)
+            } else {
+                Mat4::IDENTITY
+            };
+            let xform = scale * spin;
             for (slot, (_mesh_idx, node_idx)) in gs.draws.iter().enumerate() {
-                let model = spin * world[*node_idx];
+                let model = xform * world[*node_idx];
                 let mu = ModelU {
                     model: model.to_cols_array_2d(),
                     normal_mat: normal_matrix(model).to_cols_array_2d(),
@@ -1085,7 +1100,7 @@ impl Renderer {
             // blend meshes far->near by squared distance from the camera.
             let cam = Vec3::from_array(params.camera_pos);
             let world_center =
-                |i: usize| (spin * world[gs.draws[i].1]).transform_point3(Vec3::ZERO);
+                |i: usize| (xform * world[gs.draws[i].1]).transform_point3(Vec3::ZERO);
             let mut order: Vec<usize> = (0..gs.draws.len()).collect();
             order.sort_by(|&a, &b| {
                 match (
@@ -1334,6 +1349,15 @@ impl Renderer {
 
     /// Maps the staging buffer of the last requested screenshot and converts
     /// BGRA (Bgra8Unorm runtime target) to RGBA bytes.
+    ///
+    /// Orientation (verified empirically in the Task 13 smoke — the harness
+    /// compared a `collect_screenshot` capture against a readback of the same
+    /// frame blitted to a screen-sized texture): the staging copy's row 0 IS
+    /// the screen's top row, so the PNG needs NO row reversal. The suspected
+    /// flip (Task 7 review) does not exist: post.wgsl and blit.wgsl both map
+    /// uv.y = 1 - (ndc.y+1)/2, and with wgpu's NDC-to-framebuffer mapping
+    /// that composes to orientation-preserving copies — the screen is upright
+    /// and `final` is stored upright in memory.
     pub fn collect_screenshot(&mut self, device: &wgpu::Device) -> Option<image::RgbaImage> {
         let job = self.screenshot_job.take()?;
         let len = job.bytes_per_row * job.height;
@@ -1348,15 +1372,7 @@ impl Renderer {
             return None;
         }
         let view = job.buffer.get_mapped_range(0..len as u64).ok()?;
-        let mut img = image::RgbaImage::new(job.width, job.height);
-        for y in 0..job.height {
-            let row_start = (y * job.bytes_per_row) as usize;
-            for x in 0..job.width {
-                let o = row_start + (x * 4) as usize;
-                let (b, g, r, a) = (view[o], view[o + 1], view[o + 2], view[o + 3]);
-                img.put_pixel(x, y, image::Rgba([r, g, b, a]));
-            }
-        }
+        let img = readback_to_image(&view, job.width, job.height, job.bytes_per_row);
         drop(view);
         job.buffer.unmap();
         Some(img)
@@ -1647,6 +1663,23 @@ fn shadow_view_proj(light_pos: Vec3, center: Vec3, bounds_radius: f32) -> Mat4 {
         * Mat4::look_at_rh(light_pos, center, up)
 }
 
+/// Converts one BGRA readback buffer into an RGBA `RgbaImage`, rows in order:
+/// the staging copy's row 0 is the screen's top row (orientation verified
+/// against a same-frame blit readback in the Task 13 smoke — see
+/// collect_screenshot), so no flip is applied; only BGRA->RGBA is swapped.
+fn readback_to_image(view: &[u8], width: u32, height: u32, bytes_per_row: u32) -> image::RgbaImage {
+    let mut img = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        let row_start = (y * bytes_per_row) as usize;
+        for x in 0..width {
+            let o = row_start + (x * 4) as usize;
+            let (b, g, r, a) = (view[o], view[o + 1], view[o + 2], view[o + 3]);
+            img.put_pixel(x, y, image::Rgba([r, g, b, a]));
+        }
+    }
+    img
+}
+
 /// Normal matrix = inverse-transpose of the model's upper-left 3x3, padded
 /// back to 4x4. Falls back to identity for degenerate (zero-scale) transforms.
 fn normal_matrix(model: Mat4) -> Mat4 {
@@ -1705,6 +1738,31 @@ fn build_disc_buffers(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32
 mod tests {
     use super::*;
     use glam::Vec2;
+
+    /// The screenshot readback conversion: BGRA->RGBA byte swap with rows in
+    /// order (the staging copy's row 0 is the screen's top row — orientation
+    /// verified against a same-frame blit readback in the Task 13 smoke).
+    #[test]
+    fn readback_swaps_to_rgba_preserving_row_order() {
+        // 2x3 image, padded rows (bytes_per_row 16); distinct values per row
+        // and channel prove the byte swap and that no flip is applied.
+        let px = |r: u8, g: u8, b: u8, a: u8| [b, g, r, a]; // BGRA order
+        let mut buf = vec![0u8; 16 * 3];
+        buf[0..4].copy_from_slice(&px(1, 2, 3, 4));
+        buf[4..8].copy_from_slice(&px(5, 6, 7, 8));
+        buf[16..20].copy_from_slice(&px(9, 10, 11, 12));
+        buf[20..24].copy_from_slice(&px(13, 14, 15, 16));
+        buf[32..36].copy_from_slice(&px(17, 18, 19, 20));
+        buf[36..40].copy_from_slice(&px(21, 22, 23, 24));
+        let img = readback_to_image(&buf, 2, 3, 16);
+        // Screen row 0 comes from buffer row 0, RGBA-swapped.
+        assert_eq!(img.get_pixel(0, 0).0, [1, 2, 3, 4]);
+        assert_eq!(img.get_pixel(1, 0).0, [5, 6, 7, 8]);
+        assert_eq!(img.get_pixel(0, 1).0, [9, 10, 11, 12]);
+        assert_eq!(img.get_pixel(1, 1).0, [13, 14, 15, 16]);
+        assert_eq!(img.get_pixel(0, 2).0, [17, 18, 19, 20]);
+        assert_eq!(img.get_pixel(1, 2).0, [21, 22, 23, 24]);
+    }
 
     #[test]
     fn normal_matrix_handles_uniform_scale() {
