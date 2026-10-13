@@ -8,6 +8,7 @@ use viewer_render::{DEFAULT_CLEAR_COLOR, FrameParams, LightInput, RenderSettings
 use crate::camera::OrbitCamera;
 use crate::paint;
 use crate::panels;
+use crate::themes::{THEMES, frame_lights};
 
 /// File-loading state machine (Task 8 brief Step 3).
 pub enum AppState {
@@ -27,6 +28,15 @@ pub struct ViewerApp {
     /// Result channel of the in-flight worker thread (Some while Loading).
     load_rx: Option<std::sync::mpsc::Receiver<LoadResult>>,
     last_size: [f32; 2],
+    /// Active theme index into `themes::THEMES` (0 = Default).
+    theme_idx: usize,
+    /// User per-light intensity multipliers (panel drags, 0..3).
+    light_mult: [f32; 3],
+    /// User environment intensity multiplier (panel drag, 0..3).
+    env_mult: f32,
+    /// App-level shadow override: when off, every light's `shadows` is
+    /// forced false regardless of theme intensity.
+    shadows_enabled: bool,
 }
 
 impl ViewerApp {
@@ -46,42 +56,38 @@ impl ViewerApp {
             state: AppState::Idle,
             load_rx: None,
             last_size: [0.0, 0.0],
+            theme_idx: 0,
+            light_mult: [1.0; 3],
+            env_mult: 1.0,
+            shadows_enabled: true,
         }
     }
 
-    /// Default light rig per the design spec: 3 white lights, equal 120deg
-    /// spacing, elevation ~40deg, radius ~2.2 model units, rig rotation 0.
-    fn default_lights() -> [LightInput; 3] {
-        let (elev, radius) = (40.0f32.to_radians(), 2.2f32);
-        let rig: Vec<LightInput> = (0..3)
-            .map(|i| {
-                let az = (i as f32) * (120.0f32).to_radians();
-                LightInput {
-                    pos: [
-                        az.cos() * elev.cos() * radius,
-                        elev.sin() * radius,
-                        az.sin() * elev.cos() * radius,
-                    ],
-                    color: [1.0, 1.0, 1.0],
-                    intensity: 1.0,
-                    // Task 9: the default rig casts (the original app shows
-                    // shadows out of the box); the toolbar toggle lands in
-                    // Task 12.
-                    shadows: true,
-                }
-            })
-            .collect();
-        rig.try_into().expect("3 lights")
+    /// Builds the per-frame lighting from the active theme (Task 11): the
+    /// theme's 3-light rig (colors sRGB→linear, intensities percent-scaled),
+    /// rotated per `rig_rot_deg`; env ambient from the theme's env light.
+    /// The panel's Shadows toggle is an app-level override forcing
+    /// `shadows = false` on every light when off.
+    fn themed_lights(&self) -> ([LightInput; 3], [f32; 3], f32) {
+        let (mut lights, (env_color, env_intensity)) =
+            frame_lights(&THEMES[self.theme_idx], self.light_mult, self.env_mult);
+        if !self.shadows_enabled {
+            for light in &mut lights {
+                light.shadows = false;
+            }
+        }
+        (lights, env_color, env_intensity)
     }
 
     fn frame_params(&self, aspect: f32) -> FrameParams {
+        let (lights, env_color, env_intensity) = self.themed_lights();
         FrameParams {
             view_proj: self.camera.view_proj(aspect),
             camera_pos: self.camera.eye().to_array(),
             turntable_deg: 0.0,
-            lights: Self::default_lights(),
-            env_color: [0.4, 0.4, 0.4],
-            env_intensity: 1.0,
+            lights,
+            env_color,
+            env_intensity,
             settings: RenderSettings {
                 clear_color: DEFAULT_CLEAR_COLOR,
                 wireframe: false,
@@ -197,6 +203,16 @@ impl eframe::App for ViewerApp {
         let mut dolly_mult = 1.0f32;
         let mut reset = false;
         let mut aspect = 1.0f32;
+
+        // Settings panel (Task 11): mutates theme/lighting state; the frame
+        // params built below pick the change up in the same frame.
+        panels::lighting_panel(
+            ui,
+            &mut self.theme_idx,
+            &mut self.light_mult,
+            &mut self.env_mult,
+            &mut self.shadows_enabled,
+        );
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default())
