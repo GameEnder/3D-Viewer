@@ -25,7 +25,15 @@ fn build_cube_glb_anim(anim: Anim) -> Vec<u8> {
     let indices: Vec<u16> = vec![
         0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 1, 5, 7, 1, 7, 3, 3, 7, 6, 3, 6, 2,
         2, 6, 4, 2, 4, 0,
-    ];
+    ]
+    // Task 9 smoke finding: these faces were wound CW-from-outside (glTF
+    // requires CCW), so the cube rendered inside-out under backface culling.
+    // Flip every triangle; the load test only checks counts/materials.
+    .as_chunks::<3>()
+    .0
+    .iter()
+    .flat_map(|t| [t[0], t[2], t[1]])
+    .collect();
     let times: Vec<f32> = vec![0.0, 1.0];
     // CUBICSPLINE output layout per key: [in-tangent, value, out-tangent] (spec §5.8.2)
     let quats: Vec<f32> = match anim {

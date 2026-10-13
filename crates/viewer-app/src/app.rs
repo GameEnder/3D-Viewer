@@ -64,7 +64,10 @@ impl ViewerApp {
                     ],
                     color: [1.0, 1.0, 1.0],
                     intensity: 1.0,
-                    shadows: false,
+                    // Task 9: the default rig casts (the original app shows
+                    // shadows out of the box); the toolbar toggle lands in
+                    // Task 12.
+                    shadows: true,
                 }
             })
             .collect();
@@ -85,6 +88,7 @@ impl ViewerApp {
                 ground: true,
                 grid: false,
                 bloom: false,
+                shadows: true,
                 exposure: 0.5,
                 contrast: 1.66,
                 ground_opacity: 0.4,

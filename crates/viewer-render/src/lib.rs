@@ -30,7 +30,7 @@ use bytemuck::Zeroable;
 use egui_wgpu::wgpu;
 use egui_wgpu::wgpu::util::DeviceExt;
 use glam::{Mat3, Mat4, Vec3};
-use uniforms::{GlobalsU, LIGHT_COUNT, LightU, MaterialU, ModelU, PostU};
+use uniforms::{GlobalsU, LIGHT_COUNT, LightU, MaterialU, ModelU, PostU, ShadowVpU};
 
 /// Light intensity multiplier — the theme's normalized intensity (100 = 1.0)
 /// is multiplied by this before reaching the shader. Keep in sync with
@@ -62,6 +62,9 @@ pub struct RenderSettings {
     pub ground: bool,
     pub grid: bool,
     pub bloom: bool,
+    /// Master shadow toggle (Task 9): a light casts only when BOTH this and
+    /// its `LightInput.shadows` are set. Toolbar toggle lands in Task 12.
+    pub shadows: bool,
     pub exposure: f32,
     pub contrast: f32,
     pub ground_opacity: f32,
@@ -90,6 +93,21 @@ struct PbrPipelines {
 const GROUND_SEGMENTS: u32 = 64;
 const GROUND_RADIUS: f32 = 2.6;
 
+/// Per-light shadow map edge length in texels (Task 9). `LightU.shadow.y`
+/// (the PCF texel size) must stay 1/SHADOW_MAP_SIZE.
+const SHADOW_MAP_SIZE: u32 = 512;
+/// Texel size fed to the PCF samplers (`LightU.shadow.y`).
+const SHADOW_TEXEL: f32 = 1.0 / SHADOW_MAP_SIZE as f32;
+/// Depth bias for the shadow pass (constant, in depth-format units) — tuned
+/// at smoke: kills self-shadow acne on the cube's lit faces without visible
+/// peter-panning.
+const SHADOW_DEPTH_BIAS: i32 = 2;
+/// Slope-scaled depth bias for the shadow pass. Tuned at smoke: 1.0 left one
+/// failing PCF tap (1/255 darkening) on grazing faces — the downhill texel's
+/// stored depth landed within the receiver bias. 2.0 covers the steepest
+/// rig-angle face slopes without visible peter-panning.
+const SHADOW_SLOPE_BIAS: f32 = 2.0;
+
 /// Offscreen render targets recreated on resize. Only the views of the
 /// MSAA/depth targets are stored (a wgpu view pins its parent texture via an
 /// Arc); `final_tex` is kept as a handle for the screenshot copy.
@@ -101,10 +119,20 @@ struct FrameTargets {
     final_view: wgpu::TextureView,
 }
 
-/// 1x1 stand-ins for shadow maps / bloom / empty-scene sampling (Task 9/10
-/// swap in real resources without touching the shaders).
+/// Per-light shadow resources (Task 9): one 512² depth32float map plus the
+/// tiny view-projection uniform the depth-only pipeline renders with. The
+/// view pins its texture (wgpu 30 Arc), so no separate `Texture` handle is
+/// stored.
+struct ShadowMap {
+    view: wgpu::TextureView,
+    ub: wgpu::Buffer,
+    bg: wgpu::BindGroup,
+}
+
+/// 1x1 stand-ins for bloom / empty-scene sampling (Task 10 swaps in the real
+/// chain without touching the shaders). The shadow maps are real since
+/// Task 9 (512² per light, bound directly by `globals_bg`).
 struct Dummies {
-    shadow_views: Vec<wgpu::TextureView>,
     black_tex: wgpu::Texture,
     black_view: wgpu::TextureView,
     /// (bloom_a, bloom_b) dummies; bloom_a's view fills the post bloom slot
@@ -136,6 +164,8 @@ pub struct Renderer {
     ground_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
+    /// Depth-only pipeline for the per-light shadow maps (Task 9).
+    shadow_pipeline: wgpu::RenderPipeline,
     material_bgl: wgpu::BindGroupLayout,
     model_bgl: wgpu::BindGroupLayout,
     post_bgl: wgpu::BindGroupLayout,
@@ -164,6 +194,9 @@ pub struct Renderer {
     queued: Option<FrameParams>,
     pending_screenshot: bool,
     screenshot_job: Option<ScreenshotJob>,
+    /// One 512² depth map per rig light, indexed like `FrameParams.lights`
+    /// (Task 9).
+    shadow_maps: Vec<ShadowMap>,
     dummies: Dummies,
     fallbacks: Fallbacks,
     dummies_cleared: bool,
@@ -208,6 +241,10 @@ impl Renderer {
         let ground_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ground.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ground.wgsl").into()),
+        });
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
         });
 
         let globals_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -305,6 +342,22 @@ impl Renderer {
                 count: None,
             }],
         });
+        // Shadow pass uniforms (Task 9): one ShadowVp per light at group 0;
+        // the model slot reuses model_bgl at group 1 (shadow.wgsl declares it
+        // there — see the binding contract in shadow.wgsl).
+        let shadow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<ShadowVpU>() as u64),
+                },
+                count: None,
+            }],
+        });
         let post_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post_bgl"),
             entries: &[
@@ -358,6 +411,11 @@ impl Renderer {
         let post_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post_layout"),
             bind_group_layouts: &[Some(&post_bgl)],
+            immediate_size: 0,
+        });
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow_layout"),
+            bind_group_layouts: &[Some(&shadow_bgl), Some(&model_bgl)],
             immediate_size: 0,
         });
         let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -423,6 +481,10 @@ impl Renderer {
             false,
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
+        // Shadow pass (Task 9): depth-only (no fragment stage), 512²
+        // Depth32Float attachment, sample_count 1, pipeline depth bias to
+        // suppress acne (constants tuned at smoke, see SHADOW_* consts).
+        let shadow_pipeline = build_shadow_pipeline(device, &shadow_layout, &shadow_shader);
 
         // Uniform buffers.
         let globals_ub = device.create_buffer(&wgpu::BufferDescriptor {
@@ -450,18 +512,48 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // Dummy shadow maps (depth, 1x1, cleared to 1.0 on first prepare) and
-        // black 1x1 float textures for the empty-scene post pass / bloom slot.
-        let mut shadow_views = Vec::new();
-        for i in 0..3 {
-            let tex = dummy_texture(
-                device,
-                &format!("dummy_shadow_{i}"),
-                wgpu::TextureFormat::Depth32Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            );
-            shadow_views.push(tex.create_view(&Default::default()));
+        // Real shadow maps (Task 9): one 512² depth32float texture per rig
+        // light + its view-proj uniform and bind group. Cleared to 1.0 each
+        // frame by the shadow pass for lights with shadows enabled; disabled
+        // lights skip the pass and their stale maps are never sampled
+        // (LightU.shadow.x = 0 gates the shader side).
+        let mut shadow_maps = Vec::with_capacity(LIGHT_COUNT);
+        for i in 0..LIGHT_COUNT {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("shadow_map_{i}")),
+                size: wgpu::Extent3d {
+                    width: SHADOW_MAP_SIZE,
+                    height: SHADOW_MAP_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            let ub = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("shadow_vp_ub_{i}")),
+                size: size_of::<ShadowVpU>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("shadow_vp_bg_{i}")),
+                layout: &shadow_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ub.as_entire_binding(),
+                }],
+            });
+            shadow_maps.push(ShadowMap { view, ub, bg });
         }
+
+        // Dummy black 1x1 float textures for the empty-scene post pass /
+        // bloom slot.
         let black_tex = dummy_texture(
             device,
             "dummy_black",
@@ -483,7 +575,6 @@ impl Renderer {
             bloom_chain.push((tex, view));
         }
         let dummies = Dummies {
-            shadow_views,
             black_tex,
             black_view,
             bloom_chain,
@@ -553,15 +644,15 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&dummies.shadow_views[0]),
+                    resource: wgpu::BindingResource::TextureView(&shadow_maps[0].view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&dummies.shadow_views[1]),
+                    resource: wgpu::BindingResource::TextureView(&shadow_maps[1].view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&dummies.shadow_views[2]),
+                    resource: wgpu::BindingResource::TextureView(&shadow_maps[2].view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -634,6 +725,7 @@ impl Renderer {
             ground_pipeline,
             post_pipeline,
             blit_pipeline,
+            shadow_pipeline,
             material_bgl,
             model_bgl,
             post_bgl,
@@ -658,6 +750,7 @@ impl Renderer {
             queued: None,
             pending_screenshot: false,
             screenshot_job: None,
+            shadow_maps,
             dummies,
             fallbacks,
             dummies_cleared: false,
@@ -797,7 +890,7 @@ impl Renderer {
         if self.size.0 == 0 || self.size.1 == 0 {
             return;
         }
-        self.ensure_dummies_initialized(queue, encoder);
+        self.ensure_dummies_initialized(queue);
         let Some(params) = self.queued.take() else {
             return;
         };
@@ -817,18 +910,46 @@ impl Renderer {
         };
         queue.write_buffer(&self.post_ub, 0, bytemuck::bytes_of(&post));
 
-        // Light uniforms: dummy shadow state until Task 9 (view_proj identity,
-        // shadow.x flag = 0 disables sampling in pbr.wgsl).
+        // Per-light shadow state (Task 9): fit an ortho projection around the
+        // scene bounds for every light that casts. The SAME matrix goes into
+        // LightU.view_proj (pbr.wgsl/ground.wgsl transform world→shadow space
+        // with it) and the per-light SVP uniform the shadow pass renders with,
+        // so reprojected receivers line up with the rasterized depths.
+        let mut shadow_vp = [Mat4::IDENTITY; LIGHT_COUNT];
+        let mut shadow_on = [false; LIGHT_COUNT];
+        if let Some(gs) = self.gpu_scene.as_ref() {
+            let center = gs.scene.bounds.center();
+            let radius = gs.scene.bounds.bounding_sphere_radius();
+            for (i, li) in params.lights.iter().enumerate() {
+                if li.shadows && params.settings.shadows {
+                    shadow_vp[i] = shadow_view_proj(Vec3::from_array(li.pos), center, radius);
+                    shadow_on[i] = true;
+                }
+            }
+        }
+
         let mut lights = [LightU::zeroed(); LIGHT_COUNT];
-        for (lu, li) in lights.iter_mut().zip(params.lights.iter()) {
+        for (i, lu) in lights.iter_mut().enumerate() {
+            let li = &params.lights[i];
             *lu = LightU {
                 pos: [li.pos[0], li.pos[1], li.pos[2], li.intensity],
                 color: [li.color[0], li.color[1], li.color[2], 0.0],
-                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                shadow: [if li.shadows { 1.0 } else { 0.0 }, 1.0, 0.0, 0.0],
+                view_proj: shadow_vp[i].to_cols_array_2d(),
+                shadow: [if shadow_on[i] { 1.0 } else { 0.0 }, SHADOW_TEXEL, 0.0, 0.0],
             };
         }
         queue.write_buffer(&self.lights_ub, 0, bytemuck::cast_slice(&lights));
+        for (i, on) in shadow_on.iter().enumerate() {
+            if *on {
+                queue.write_buffer(
+                    &self.shadow_maps[i].ub,
+                    0,
+                    bytemuck::bytes_of(&ShadowVpU {
+                        view_proj: shadow_vp[i].to_cols_array_2d(),
+                    }),
+                );
+            }
+        }
 
         let globals = GlobalsU {
             view_proj: params.view_proj,
@@ -935,6 +1056,44 @@ impl Renderer {
                 .map(DrawStep::Mesh)
                 .chain(ground_draw.then_some(DrawStep::Ground))
                 .chain(order[blend_start..].iter().copied().map(DrawStep::Mesh));
+
+            // Shadow passes (Task 9): one depth-only pass per shadow-casting
+            // light — clear its 512² map to 1.0 and draw the non-blend draws
+            // with the same model dynamic-offset slots the pbr pass uses.
+            // Blend casters are a known simplification (the original app does
+            // similar). Disabled lights skip the pass entirely: their map
+            // holds stale depth that is never sampled (LightU.shadow.x = 0).
+            for (i, on) in shadow_on.iter().enumerate() {
+                if !on {
+                    continue;
+                }
+                let map = &self.shadow_maps[i];
+                let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("shadow_pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &map.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                spass.set_pipeline(&self.shadow_pipeline);
+                spass.set_bind_group(0, &map.bg, &[]);
+                for &d in &order[..blend_start] {
+                    let (mesh_idx, _node_idx) = gs.draws[d];
+                    let mesh = &gs.meshes[mesh_idx];
+                    spass.set_bind_group(1, &self.model_bg, &[(d * 256) as u32]);
+                    spass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                    spass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    spass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pbr_pass"),
@@ -1122,13 +1281,9 @@ impl Renderer {
     }
 
     /// One-time initialization of the 1x1 dummy resources: float dummies get
-    /// their pixels via the queue, depth dummies are cleared to 1.0 with tiny
-    /// render passes in the current encoder (before any sampling pass).
-    fn ensure_dummies_initialized(
-        &mut self,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-    ) {
+    /// their pixels via the queue. (The shadow maps are real since Task 9 and
+    /// are cleared by their own render passes each frame.)
+    fn ensure_dummies_initialized(&mut self, queue: &wgpu::Queue) {
         if self.dummies_cleared {
             return;
         }
@@ -1185,23 +1340,6 @@ impl Renderer {
         write_pixel(&self.fallbacks.mr_tex, [255, 255, 255, 255]);
         write_pixel(&self.fallbacks.normal_tex, [128, 128, 255, 255]);
         write_pixel(&self.fallbacks.emissive_tex, [0, 0, 0, 255]);
-        for view in &self.dummies.shadow_views {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear_dummy_shadow"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
         self.dummies_cleared = true;
     }
 
@@ -1362,6 +1500,65 @@ fn build_fullscreen_pipeline(
     })
 }
 
+/// Depth-only pipeline for the per-light shadow maps (Task 9): vertex stage
+/// only, full scene vertex layout (only position is consumed by shadow.wgsl),
+/// Depth32Float attachment with sample_count 1 (the maps are not MSAA) and
+/// pipeline depth bias against self-shadow acne.
+fn build_shadow_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("shadow_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(gpu_scene::vertex_layout())],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: Default::default(),
+            bias: wgpu::DepthBiasState {
+                constant: SHADOW_DEPTH_BIAS,
+                slope_scale: SHADOW_SLOPE_BIAS,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: None,
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Ortho view-projection fitting one shadow-casting light around the scene
+/// bounds (brief Step 2): half-extent = radius * 1.25, near 0.05, far
+/// dist + 2.5 * half-extent, view = look_at_rh(light → center). Up is +Y
+/// except for near-vertical lights, where look_at with up = +Y degenerates —
+/// the brief's guard falls back to +Z there.
+fn shadow_view_proj(light_pos: Vec3, center: Vec3, bounds_radius: f32) -> Mat4 {
+    let r = bounds_radius * 1.25;
+    let to_light = light_pos - center;
+    let dist = to_light.length().max(1e-4);
+    let up = if to_light.y.abs() > 0.99 * dist {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    Mat4::orthographic_rh(-r, r, -r, r, 0.05, dist + 2.5 * r)
+        * Mat4::look_at_rh(light_pos, center, up)
+}
+
 /// Normal matrix = inverse-transpose of the model's upper-left 3x3, padded
 /// back to 4x4. Falls back to identity for degenerate (zero-scale) transforms.
 fn normal_matrix(model: Mat4) -> Mat4 {
@@ -1419,6 +1616,7 @@ fn build_disc_buffers(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec2;
 
     #[test]
     fn normal_matrix_handles_uniform_scale() {
@@ -1434,5 +1632,42 @@ mod tests {
         let m = Mat4::from_rotation_y(1.23);
         let n = normal_matrix(m);
         assert!(n.abs_diff_eq(m, 1e-5));
+    }
+
+    #[test]
+    fn shadow_fit_centers_scene_and_covers_catchment() {
+        // A rig light (40° elevation, 2.2 out) around a normalized scene
+        // (radius 1, base y=0): the bounds center must project to the map
+        // center with depth inside (0,1), and the ground point where the
+        // model-top shadow lands (~1.4 units from center, away from the
+        // light) must still reproject into the map's uv/depth range —
+        // otherwise the shadow tail would be culled by shadow_factor's uv
+        // guard.
+        let center = Vec3::new(0.0, 0.5, 0.0);
+        let el = 40.0f32.to_radians();
+        let eye = center + Vec3::new(el.cos(), el.sin(), 0.0) * 2.2;
+        let vp = shadow_view_proj(eye, center, 1.0);
+        let c = vp * center.extend(1.0);
+        assert!((c.x / c.w).abs() < 1e-5 && (c.y / c.w).abs() < 1e-5);
+        assert!(c.z / c.w > 0.0 && c.z / c.w < 1.0);
+        // catchment: away-from-light horizontal direction, ground level
+        let away = -Vec3::new(el.cos(), 0.0, 0.0);
+        let p = Vec3::new(center.x, 0.0, center.z) + away * 1.4;
+        let s = vp * p.extend(1.0);
+        let uv = Vec2::new(s.x / s.w * 0.5 + 0.5, 1.0 - (s.y / s.w * 0.5 + 0.5));
+        assert!(uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0);
+        assert!(s.z / s.w > 0.0 && s.z / s.w < 1.0);
+    }
+
+    #[test]
+    fn shadow_fit_survives_top_light() {
+        // A light directly above the center degenerates look_at(up = +Y);
+        // the guard must keep every projected coordinate finite.
+        let center = Vec3::new(0.0, 0.5, 0.0);
+        let vp = shadow_view_proj(Vec3::new(0.0, 4.0, 0.0), center, 1.0);
+        let c = vp * center.extend(1.0);
+        assert!(c.x.is_finite() && c.y.is_finite() && c.z.is_finite() && c.w.is_finite());
+        assert!((c.x / c.w).abs() < 1e-5 && (c.y / c.w).abs() < 1e-5);
+        assert!(c.z / c.w > 0.0 && c.z / c.w < 1.0);
     }
 }
