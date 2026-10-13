@@ -1,6 +1,7 @@
 // crates/viewer-scene/src/loaders/mod.rs
 pub mod gltf_loader;
 pub mod obj_loader;
+pub mod ply_loader;
 pub mod stl_loader;
 
 use crate::error::LoadError;
@@ -15,11 +16,7 @@ pub fn load(path: &std::path::Path) -> Result<Scene, LoadError> {
         Some("glb") | Some("gltf") => gltf_loader::load(path)?,
         Some("obj") => obj_loader::load(path)?,
         Some("stl") => stl_loader::load(path)?,
-        Some("ply") => {
-            return Err(LoadError::UnsupportedFormat(
-                "PLY (arrives in Task 16)".into(),
-            ));
-        }
+        Some("ply") => ply_loader::load(path)?,
         Some("3mf") => {
             return Err(LoadError::UnsupportedFormat(
                 "3MF (arrives in Task 19)".into(),
