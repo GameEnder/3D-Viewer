@@ -3,6 +3,12 @@
 //! with exposure/contrast, and a final `target_format` texture that the app
 //! blits into the egui render pass.
 //!
+//! Bloom (Task 10, see post.rs): when `RenderSettings.bloom` is set, a
+//! threshold + separable gaussian chain runs at half resolution between the
+//! MSAA resolve and the post pass; post samples its `bloom_a` result with
+//! weight 0.11. When off, the post bind group keeps the 1x1 dummy and weight
+//! 0.0 (bit-identical to the pre-bloom path).
+//!
 //! Binding contract (must match the WGSL in shaders/):
 //! - globals group 0: bindings 0-1 uniforms, 2-4 shadow depth textures, 5 comparison sampler
 //! - material group 1: bindings 0-4 uniform + textures, 5 sampler
@@ -21,6 +27,7 @@
 //!   runtime); Task 13 consumes `collect_screenshot`.
 
 pub mod gpu_scene;
+pub mod post;
 pub mod uniforms;
 
 use std::cmp::Ordering;
@@ -129,14 +136,16 @@ struct ShadowMap {
     bg: wgpu::BindGroup,
 }
 
-/// 1x1 stand-ins for bloom / empty-scene sampling (Task 10 swaps in the real
-/// chain without touching the shaders). The shadow maps are real since
-/// Task 9 (512² per light, bound directly by `globals_bg`).
+/// 1x1 stand-ins for the empty-scene post pass and the bloom-off post bind
+/// group (Task 10: the bloom-on group binds the real half-res chain's
+/// `bloom_a`; the 1x1 dummies stay bound whenever bloom is off). The shadow
+/// maps are real since Task 9 (512² per light, bound directly by
+/// `globals_bg`).
 struct Dummies {
     black_tex: wgpu::Texture,
     black_view: wgpu::TextureView,
-    /// (bloom_a, bloom_b) dummies; bloom_a's view fills the post bloom slot
-    /// until Task 10 builds the real half-res chain.
+    /// (bloom_a, bloom_b) 1x1 dummies; bloom_a's stays in the post bind group
+    /// while bloom is off (never sampled there — weight 0.0).
     bloom_chain: Vec<(wgpu::Texture, wgpu::TextureView)>,
 }
 
@@ -185,7 +194,11 @@ pub struct Renderer {
     ground_ib: wgpu::Buffer,
     ground_index_count: u32,
     post_bg: Option<wgpu::BindGroup>,
+    /// Post bind group with the real `bloom_a` view (bloom ON).
+    post_bg_bloom: Option<wgpu::BindGroup>,
     post_bg_empty: wgpu::BindGroup,
+    /// Bloom chain (Task 10): stateless pipeline + half-res targets/binds.
+    bloom: post::Bloom,
     blit_bg: Option<wgpu::BindGroup>,
     lin_sampler: wgpu::Sampler,
     targets: Option<FrameTargets>,
@@ -552,6 +565,11 @@ impl Renderer {
             shadow_maps.push(ShadowMap { view, ub, bg });
         }
 
+        // Bloom chain (Task 10): pipeline + bind group layout built once; the
+        // half-res targets and per-pass bind groups follow the frame targets
+        // in resize().
+        let bloom = post::Bloom::new(device);
+
         // Dummy black 1x1 float textures for the empty-scene post pass /
         // bloom slot.
         let black_tex = dummy_texture(
@@ -741,6 +759,7 @@ impl Renderer {
             ground_ib,
             ground_index_count,
             post_bg: None,
+            post_bg_bloom: None,
             post_bg_empty,
             blit_bg: None,
             lin_sampler,
@@ -754,6 +773,7 @@ impl Renderer {
             dummies,
             fallbacks,
             dummies_cleared: false,
+            bloom,
         }
     }
 
@@ -800,7 +820,9 @@ impl Renderer {
             self.targets = None;
             self.size = (width, height);
             self.post_bg = None;
+            self.post_bg_bloom = None;
             self.blit_bg = None;
+            self.bloom.clear();
             return;
         }
         let size = wgpu::Extent3d {
@@ -855,8 +877,22 @@ impl Renderer {
         let depth_view = depth_tex.create_view(&Default::default());
         let final_view = final_tex.create_view(&Default::default());
 
-        // Rebuild the bind groups that reference the resized textures.
-        self.post_bg = Some(self.build_post_bg(device, &hdr_view));
+        // Half-res bloom chain (Task 10): ping-pong targets at half the final
+        // size (min 1), recreated with the frame targets. The threshold pass's
+        // bind group pins this resize's hdr view.
+        let bw = (width / 2).max(1);
+        let bh = (height / 2).max(1);
+        self.bloom
+            .resize(device, &self.lin_sampler, &hdr_view, bw, bh);
+
+        // Rebuild the bind groups that reference the resized textures. The
+        // bloom-off group keeps the 1x1 dummy in the bloom slot (never
+        // sampled at weight 0.0); the bloom-on group binds the chain result.
+        self.post_bg_bloom = self
+            .bloom
+            .bloom_a_view()
+            .map(|v| self.build_post_bg(device, &hdr_view, v));
+        self.post_bg = Some(self.build_post_bg(device, &hdr_view, &self.dummies.bloom_chain[0].1));
         self.blit_bg = Some(self.build_blit_bg(device, &final_view));
 
         self.targets = Some(FrameTargets {
@@ -895,11 +931,17 @@ impl Renderer {
             return;
         };
 
-        // Post uniforms (bloom weight stays 0.0 until Task 10 feeds the chain).
+        // Post uniforms. Bloom weight = the original app's exact default when
+        // the chain runs, 0.0 otherwise (the off-path bind group's 1x1 dummy
+        // is never sampled at weight 0.0).
         let post = PostU {
             exposure: params.settings.exposure,
             contrast: params.settings.contrast,
-            bloom_weight: 0.0,
+            bloom_weight: if params.settings.bloom {
+                post::BLOOM_WEIGHT
+            } else {
+                0.0
+            },
             pad: 0.0,
             clear_color: [
                 params.settings.clear_color[0],
@@ -1159,6 +1201,16 @@ impl Renderer {
             }
         }
 
+        // Bloom chain (Task 10): threshold + separable blur at half res, run
+        // after the MSAA resolve (the pbr pass above) and before the post
+        // pass, only when bloom is enabled and a scene is present. The
+        // threshold reads the resolved HDR; background pixels (cleared to
+        // linear rgb with luminance ~0.07 << 1.0) never pass the threshold,
+        // so no halo forms over the background.
+        if params.settings.bloom && self.gpu_scene.is_some() {
+            self.bloom.record(encoder);
+        }
+
         // Post pass: HDR -> final (full-screen triangle). With no scene the
         // black 1x1 source has alpha 0, so every pixel takes the background
         // branch and `final` ends up holding the encoded clear color.
@@ -1180,9 +1232,17 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.post_pipeline);
-            let bg = match self.gpu_scene.as_ref() {
-                Some(_) => self.post_bg.as_ref().or(Some(&self.post_bg_empty)),
-                None => Some(&self.post_bg_empty),
+            // Scene present + bloom on -> the real chain result; otherwise the
+            // 1x1 dummy (bloom off: weight 0.0, never sampled / empty scene:
+            // background branch discards everything anyway).
+            let bg = match (self.gpu_scene.as_ref(), params.settings.bloom) {
+                (Some(_), true) => self
+                    .post_bg_bloom
+                    .as_ref()
+                    .or(self.post_bg.as_ref())
+                    .or(Some(&self.post_bg_empty)),
+                (Some(_), false) => self.post_bg.as_ref().or(Some(&self.post_bg_empty)),
+                (None, _) => Some(&self.post_bg_empty),
             };
             if let Some(bg) = bg {
                 pass.set_bind_group(0, bg, &[]);
@@ -1347,6 +1407,7 @@ impl Renderer {
         &self,
         device: &wgpu::Device,
         hdr_view: &wgpu::TextureView,
+        bloom_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post_bg"),
@@ -1358,7 +1419,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.dummies.bloom_chain[0].1),
+                    resource: wgpu::BindingResource::TextureView(bloom_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
