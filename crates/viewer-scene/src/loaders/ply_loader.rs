@@ -341,7 +341,15 @@ fn parse_ascii(bytes: &[u8], header: &Header) -> Result<PlyData, LoadError> {
                 }
             }
             _ => {
-                // unknown element: skip count records in property order
+                // unknown element: skip count records in property order.
+                // Ruling (Task 16 review): a zero-property element consumes
+                // nothing per record, so a huge declared count used to spin
+                // here ~forever. Every record of a real element consumes at
+                // least one token (≥ 1 byte), so a count beyond the file
+                // size can never fit — error instead of looping.
+                if elem.count > bytes.len() {
+                    return Err(bad("element count exceeds the file size"));
+                }
                 for _ in 0..elem.count {
                     for prop in &elem.props {
                         match prop.kind {
@@ -462,7 +470,15 @@ fn parse_binary(bytes: &[u8], header: &Header) -> Result<PlyData, LoadError> {
                 }
             }
             _ => {
-                // unknown element: skip count records in property order
+                // unknown element: skip count records in property order.
+                // Ruling (Task 16 review): a zero-property element never
+                // advances `off`, so a huge declared count used to spin
+                // here ~forever. Every record of a real element consumes at
+                // least one byte, so a count beyond the file size can never
+                // fit — error instead of looping.
+                if elem.count > bytes.len() {
+                    return Err(bad("element count exceeds the file size"));
+                }
                 for _ in 0..elem.count {
                     for prop in &elem.props {
                         match prop.kind {

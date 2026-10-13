@@ -203,3 +203,44 @@ fn ply_without_faces_is_point_soup() {
     assert!(s.meshes[0].indices.is_empty());
     assert_eq!(s.tri_count, 2); // soup: positions/3
 }
+
+// Task 16 review regression: a zero-property unknown element consumes
+// nothing per record, so a huge declared count used to loop ~forever in the
+// skip path. The skip bound (count vs file size) must reject it promptly.
+const HUGE_COUNT: usize = 4_000_000_000;
+
+#[test]
+fn ascii_unknown_zero_property_element_with_huge_count_errors_not_hangs() {
+    let bytes = format!(
+        "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nelement junk {HUGE_COUNT}\nend_header\n0 0 0\n"
+    );
+    let dir = std::env::temp_dir().join("viewer-ply-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("ascii-huge-skip.ply");
+    std::fs::write(&p, bytes).unwrap();
+    let err = viewer_scene::load(&p).map(|_| ()).unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds the file size"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn binary_unknown_zero_property_element_with_huge_count_errors_not_hangs() {
+    let header = format!(
+        "ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nelement junk {HUGE_COUNT}\nend_header\n"
+    );
+    let mut b = header.into_bytes();
+    b.extend_from_slice(&0.5f32.to_le_bytes());
+    b.extend_from_slice(&0.5f32.to_le_bytes());
+    b.extend_from_slice(&0.5f32.to_le_bytes());
+    let dir = std::env::temp_dir().join("viewer-ply-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("bin-huge-skip.ply");
+    std::fs::write(&p, b).unwrap();
+    let err = viewer_scene::load(&p).map(|_| ()).unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds the file size"),
+        "unexpected error: {err}"
+    );
+}

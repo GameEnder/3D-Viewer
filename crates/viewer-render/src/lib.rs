@@ -194,6 +194,14 @@ pub struct Renderer {
     /// uniform buffer; wgpu 30 bind groups pin their buffers via Arc, so no
     /// separate handle is stored).
     ground_model_bg: wgpu::BindGroup,
+    /// Dummy material bind group for the ground pass (Task 13 review): the
+    /// ground pipeline shares `pbr_layout`, whose group 1 is the material
+    /// layout that ground.wgsl never samples — wgpu still requires the group
+    /// bound at draw time, and with an all-blend scene the ground draw is the
+    /// FIRST draw of the pbr pass (no mesh's group 1 is live yet), which used
+    /// to fail validation. Binds the 1x1 fallbacks + a zeroed uniform, so the
+    /// draw is valid regardless of the scene's materials.
+    ground_material_bg: wgpu::BindGroup,
     ground_vb: wgpu::Buffer,
     ground_ib: wgpu::Buffer,
     ground_index_count: u32,
@@ -490,9 +498,11 @@ impl Renderer {
         );
         // Ground disc: same vertex layout and pass targets as the pbr
         // pipelines, but depth-write off and alpha blended (Task 8 Step 2).
-        // Shares pbr_layout (group 1 is unused by ground.wgsl — statically
-        // unused groups need not be bound). Reuses build_pbr_pipeline, whose
-        // fixed Rgba16Float/Depth24Plus/4xMSAA match the pbr pass.
+        // Shares pbr_layout (its group 1 gets the dedicated dummy
+        // ground_material_bg — ground.wgsl never samples the material group
+        // but the layout declares it, see the Task 13 review note there).
+        // Reuses build_pbr_pipeline, whose fixed Rgba16Float/Depth24Plus/4xMSAA
+        // match the pbr pass.
         let ground_pipeline = build_pbr_pipeline(
             device,
             &pbr_layout,
@@ -673,6 +683,50 @@ impl Renderer {
             ..Default::default()
         });
 
+        // Dedicated dummy material bind group for the ground pass (Task 13
+        // review): the ground pipeline shares pbr_layout whose group 1 is the
+        // material layout, but ground.wgsl never samples it — wgpu still
+        // requires the group bound at draw time, and with an all-blend scene
+        // the ground draw is the FIRST draw of the pbr pass (no mesh's group
+        // 1 is live yet), which failed validation. The dummy (zeroed uniform
+        // + 1x1 fallbacks) keeps the draw valid regardless of scene materials.
+        let ground_material_ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_material_ub"),
+            contents: bytemuck::bytes_of(&MaterialU::zeroed()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        // Pinned by ground_material_bg (wgpu 30); no separate handle stored.
+        let ground_material_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ground_material_bg"),
+            layout: &material_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ground_material_ub.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&fallbacks.base),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&fallbacks.mr),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&fallbacks.normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&fallbacks.emissive),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&lin_sampler),
+                },
+            ],
+        });
+
         let globals_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("globals_bg"),
             layout: &globals_bgl,
@@ -780,6 +834,7 @@ impl Renderer {
             globals_bg,
             model_bg,
             ground_model_bg,
+            ground_material_bg,
             ground_vb,
             ground_ib,
             ground_index_count,
@@ -914,11 +969,18 @@ impl Renderer {
         // Rebuild the bind groups that reference the resized textures. The
         // bloom-off group keeps the 1x1 dummy in the bloom slot (never
         // sampled at weight 0.0); the bloom-on group binds the chain result.
+        // Labels (ruling, Task 9/10 review): the two scene post groups are
+        // named by bloom state so captures distinguish them.
         self.post_bg_bloom = self
             .bloom
             .bloom_a_view()
-            .map(|v| self.build_post_bg(device, &hdr_view, v));
-        self.post_bg = Some(self.build_post_bg(device, &hdr_view, &self.dummies.bloom_chain[0].1));
+            .map(|v| self.build_post_bg(device, "post_bg_bloom_on", &hdr_view, v));
+        self.post_bg = Some(self.build_post_bg(
+            device,
+            "post_bg_bloom_off",
+            &hdr_view,
+            &self.dummies.bloom_chain[0].1,
+        ));
         self.blit_bg = Some(self.build_blit_bg(device, &final_view));
 
         self.targets = Some(FrameTargets {
@@ -1158,7 +1220,10 @@ impl Renderer {
                 }
                 let map = &self.shadow_maps[i];
                 let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("shadow_pass"),
+                    // Per-light label (ruling, Task 9/10 review): makes each
+                    // light's shadow pass identifiable in captures and error
+                    // messages.
+                    label: Some(&format!("shadow_pass_l{i}")),
                     color_attachments: &[],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &map.view,
@@ -1214,6 +1279,14 @@ impl Renderer {
                     DrawStep::Ground => {
                         pass.set_pipeline(&self.ground_pipeline);
                         pass.set_bind_group(0, &self.globals_bg, &[]);
+                        // Group 1: ground.wgsl never samples the material
+                        // group, but the shared pbr_layout declares it and
+                        // wgpu requires it bound at draw time — with an
+                        // all-blend scene the ground draw is the pass's FIRST
+                        // draw (no mesh's group 1 is live yet), which failed
+                        // validation (Task 13 review). The dedicated dummy
+                        // keeps the draw valid regardless of scene materials.
+                        pass.set_bind_group(1, &self.ground_material_bg, &[]);
                         pass.set_bind_group(2, &self.ground_model_bg, &[0]);
                         pass.set_vertex_buffer(0, self.ground_vb.slice(..));
                         pass.set_index_buffer(self.ground_ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -1234,10 +1307,20 @@ impl Renderer {
                             current = Some(pipe);
                         }
                         pass.set_bind_group(0, &self.globals_bg, &[]);
-                        let mat = gs
+                        // Ruling (Task 7 review): a malformed file can
+                        // reference a material index that was never uploaded
+                        // — fall back to material 0 instead of panicking. A
+                        // scene without ANY materials cannot bind anything,
+                        // so the draw is skipped (loaders always upload at
+                        // least one material).
+                        let mat = match gs
                             .materials
                             .get(mesh.material)
-                            .expect("every referenced material uploaded");
+                            .or_else(|| gs.materials.first())
+                        {
+                            Some(mat) => mat,
+                            None => continue,
+                        };
                         pass.set_bind_group(1, &mat.bind_group, &[]);
                         pass.set_bind_group(2, &self.model_bg, &[(d * 256) as u32]);
                         pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
@@ -1454,11 +1537,12 @@ impl Renderer {
     fn build_post_bg(
         &self,
         device: &wgpu::Device,
+        label: &str,
         hdr_view: &wgpu::TextureView,
         bloom_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("post_bg"),
+            label: Some(label),
             layout: &self.post_bgl,
             entries: &[
                 wgpu::BindGroupEntry {

@@ -68,6 +68,25 @@ pub struct ViewerApp {
     /// Animation playback state (Task 17): the bar writes it, `step_animation`
     /// advances it, `frame_params` feeds `(clip, time)` to the renderer.
     anim: panels::AnimationState,
+    /// Transient status-line note (Task 18): (message, expiry instant) — e.g.
+    /// a screenshot save failure. Shown at the viewport's bottom-left until
+    /// expired (a failed PNG save is shown for ~4 s).
+    note: Option<(String, std::time::Instant)>,
+}
+
+/// How long a transient status note stays visible (Task 18).
+const NOTE_DURATION: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Dialog text for a failed load (Task 18): unsupported formats get the
+/// friendly explanation plus an export hint; every other error passes its
+/// `Display` through unchanged.
+fn failed_message(err: &viewer_scene::LoadError) -> String {
+    match err {
+        viewer_scene::LoadError::UnsupportedFormat(_) => {
+            format!("{err} — export the model to GLB, OBJ, STL, PLY or 3MF and open it again.")
+        }
+        other => other.to_string(),
+    }
 }
 
 impl ViewerApp {
@@ -104,6 +123,7 @@ impl ViewerApp {
             contrast: 1.66,
             settings_open: true,
             anim: panels::AnimationState::default(),
+            note: None,
         }
     }
 
@@ -238,38 +258,70 @@ impl ViewerApp {
     /// Collects the worker result, if any (single lock — the SharedRenderer
     /// Arc IS self.renderer, so this must run before ui() takes the guard).
     fn poll_loading(&mut self, _ctx: &egui::Context) {
-        let result = self.load_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        if result.is_some() {
-            self.load_rx = None;
+        /// One try_recv on the load channel (Task 18: Disconnected is a
+        /// loader crash, not just another empty poll).
+        enum Poll {
+            Done(Result<viewer_scene::Scene, viewer_scene::LoadError>),
+            Empty,
+            /// The worker dropped its sender without ever sending: it died
+            /// (panic) mid-load.
+            Crashed,
         }
-        let Some(result) = result else { return };
-        match result {
-            Ok(scene) => {
-                self.camera
-                    .fit(scene.bounds.center(), scene.bounds.bounding_sphere_radius());
-                // Task 17: every load restarts animation playback from clip
-                // 0, paused (a stale clip index would point nowhere).
-                self.anim = panels::AnimationState::default();
-                let arc = Arc::new(scene);
-                if let Some(rs) = self.render_state.as_ref() {
-                    // parking_lot guard: read() cannot fail, so no expect.
-                    let shared = rs
-                        .renderer
-                        .read()
-                        .callback_resources
-                        .get::<paint::SharedRenderer>()
-                        .cloned();
-                    if let Some(shared) = shared {
-                        shared.0.lock().expect("renderer mutex").set_scene(
-                            &rs.device,
-                            &rs.queue,
-                            Arc::clone(&arc),
-                        );
-                    }
-                }
-                self.state = AppState::Ready(arc);
+        let poll = match self
+            .load_rx
+            .as_ref()
+            .map(std::sync::mpsc::Receiver::try_recv)
+        {
+            None => Poll::Empty,
+            Some(Ok(result)) => Poll::Done(result),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => Poll::Empty,
+            // Ruling (Task 8 review): a disconnected channel without a
+            // delivered result means the worker thread crashed — surface it
+            // instead of spinning in Loading forever.
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Poll::Crashed,
+        };
+        match poll {
+            Poll::Empty => {}
+            Poll::Crashed => {
+                self.load_rx = None;
+                self.state = AppState::Failed("loader crashed".into());
             }
-            Err(e) => self.state = AppState::Failed(e.to_string()),
+            Poll::Done(result) => {
+                self.load_rx = None;
+                match result {
+                    Ok(scene) => {
+                        self.camera
+                            .fit(scene.bounds.center(), scene.bounds.bounding_sphere_radius());
+                        // Task 17: every load restarts animation playback from clip
+                        // 0, paused (a stale clip index would point nowhere).
+                        self.anim = panels::AnimationState::default();
+                        let arc = Arc::new(scene);
+                        if let Some(rs) = self.render_state.as_ref() {
+                            // parking_lot guard: read() cannot fail, so no expect.
+                            let shared = rs
+                                .renderer
+                                .read()
+                                .callback_resources
+                                .get::<paint::SharedRenderer>()
+                                .cloned();
+                            // Ruling (Task 8 review): with a RenderState present
+                            // the paint install must have registered the shared
+                            // renderer; Ready without it would render nothing.
+                            // Release keeps the silent (empty-view) fallback.
+                            debug_assert!(shared.is_some(), "renderer missing at scene upload");
+                            if let Some(shared) = shared {
+                                shared.0.lock().expect("renderer mutex").set_scene(
+                                    &rs.device,
+                                    &rs.queue,
+                                    Arc::clone(&arc),
+                                );
+                            }
+                        }
+                        self.state = AppState::Ready(arc);
+                    }
+                    Err(e) => self.state = AppState::Failed(failed_message(&e)),
+                }
+            }
         }
     }
 }
@@ -306,6 +358,25 @@ impl eframe::App for ViewerApp {
         // so it must run before the frame's own lock below.
         self.poll_loading(ui.ctx());
 
+        // Modal error dialog (Task 18): re-shown every frame while Failed;
+        // OK returns to Idle. The message is cloned out so the ack write
+        // below cannot conflict with the state borrow.
+        let mut dialog_ack = false;
+        if let AppState::Failed(msg) = &self.state {
+            let msg = msg.clone();
+            panels::error_dialog(ui.ctx(), &msg, &mut dialog_ack);
+        }
+        if dialog_ack {
+            self.state = AppState::Idle;
+        }
+
+        // Expire transient status notes (Task 18) before this frame draws.
+        if let Some((_, until)) = &self.note
+            && std::time::Instant::now() >= *until
+        {
+            self.note = None;
+        }
+
         // Owned Arc clone: the mutex guard below must not borrow self while
         // the panel closure holds unique access.
         let renderer = self
@@ -329,7 +400,15 @@ impl eframe::App for ViewerApp {
                 .add_filter("PNG", &["png"])
                 .save_file()
         {
-            let _ = img.save(&path);
+            // Task 18: surface save failures as a transient status-line note
+            // instead of silently swallowing them (a user-cancelled dialog
+            // yields no path and stays silent).
+            if let Err(e) = img.save(&path) {
+                self.note = Some((
+                    format!("Screenshot save failed: {e}"),
+                    std::time::Instant::now() + NOTE_DURATION,
+                ));
+            }
         }
 
         // Turntable spin (Task 13): advance + keep repainting while on.
@@ -465,8 +544,14 @@ impl eframe::App for ViewerApp {
                 if matches!(self.state, AppState::Loading) {
                     panels::loading_spinner(ui, rect);
                 }
-                if let AppState::Failed(err) = &self.state {
-                    panels::error_banner(ui, rect, err);
+                // Status line (Task 18): scene info at the bottom-left when
+                // Ready; a transient note (e.g. save failure) sits one row
+                // above it so both stay readable.
+                if let Some((msg, _)) = &self.note {
+                    panels::status_note(ui, rect, msg, matches!(self.state, AppState::Ready(_)));
+                }
+                if let AppState::Ready(scene) = &self.state {
+                    panels::status_line(ui, rect, scene);
                 }
             });
 
@@ -543,6 +628,7 @@ mod tests {
             contrast: 1.66,
             settings_open: true,
             anim: panels::AnimationState::default(),
+            note: None,
         }
     }
 
@@ -709,5 +795,75 @@ mod tests {
         assert!((p.settings.exposure - 1.0).abs() < 1e-6);
         assert!((p.settings.contrast - 2.0).abs() < 1e-6);
         assert!((app.camera.fov_y_deg - 70.0).abs() < 1e-6);
+    }
+
+    /// Task 18 dialog wording: unsupported formats get the friendly
+    /// explanation plus the export hint; every other error passes its
+    /// `Display` through unchanged.
+    #[test]
+    fn failed_message_wording() {
+        let msg = failed_message(&viewer_scene::LoadError::UnsupportedFormat("FBX".into()));
+        assert_eq!(
+            msg,
+            "FBX files are not supported by this viewer — export the model to GLB, OBJ, STL, PLY or 3MF and open it again."
+        );
+        let parse = failed_message(&viewer_scene::LoadError::Parse {
+            format: "STL",
+            detail: "truncated header".into(),
+        });
+        assert_eq!(parse, "STL parse error: truncated header");
+    }
+
+    /// Task 18 ruling (Task 8 review): a disconnected result channel means
+    /// the worker thread died without sending (panic) — the app must surface
+    /// Failed("loader crashed") and drop the dead channel instead of spinning
+    /// in Loading forever.
+    #[test]
+    fn disconnected_channel_maps_to_failed_loader_crashed() {
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel::<LoadResult>();
+        drop(tx); // worker died without sending
+        app.load_rx = Some(rx);
+        app.state = AppState::Loading;
+        app.poll_loading(&egui::Context::default());
+        assert!(
+            matches!(app.state, AppState::Failed(ref m) if m == "loader crashed"),
+            "disconnected channel must map to Failed(\"loader crashed\")"
+        );
+        assert!(app.load_rx.is_none(), "the dead channel must be dropped");
+    }
+
+    /// poll_loading transitions: an empty (still-alive) channel keeps
+    /// Loading; a delivered error maps to Failed (unsupported formats get
+    /// the export hint); a delivered scene maps to Ready.
+    #[test]
+    fn poll_loading_transitions() {
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel::<LoadResult>();
+        app.load_rx = Some(rx);
+        app.state = AppState::Loading;
+        app.poll_loading(&egui::Context::default());
+        assert!(matches!(app.state, AppState::Loading), "empty channel");
+
+        tx.send(Err(viewer_scene::LoadError::UnsupportedFormat(
+            "FBX".into(),
+        )))
+        .unwrap();
+        app.poll_loading(&egui::Context::default());
+        assert!(
+            matches!(app.state, AppState::Failed(ref m)
+                if m.contains("FBX") && m.contains("GLB, OBJ, STL, PLY or 3MF")),
+            "unsupported-format failure must carry the export hint"
+        );
+        assert!(app.load_rx.is_none(), "finished channel must be dropped");
+
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel::<LoadResult>();
+        app.load_rx = Some(rx);
+        app.state = AppState::Loading;
+        tx.send(Ok(viewer_scene::Scene::new("t".into()))).unwrap();
+        app.poll_loading(&egui::Context::default());
+        assert!(matches!(app.state, AppState::Ready(_)));
+        assert!(app.load_rx.is_none());
     }
 }

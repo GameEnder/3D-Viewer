@@ -1,0 +1,10 @@
+mtllib metallic.mtl
+o metal_probe
+v 0.0 0.0 0.0
+v 1.0 0.0 0.0
+v 0.0 1.0 0.0
+v 1.0 1.0 0.0
+usemtl shiny
+f 1 2 3
+usemtl dull
+f 3 2 4

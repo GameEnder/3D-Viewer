@@ -48,7 +48,7 @@ fn build_cube_glb_anim(anim: Anim) -> Vec<u8> {
         }
         _ => vec![
             0.0, 0.0, 0.0, 1.0, // identity
-            0.0, 0.3826834, 0.0, 0.9238795, // 90° around Y
+            0.0, 0.3826834, 0.0, 0.9238795, // 45° around Y (sin/cos 22.5°)
         ],
     };
     let mut bin: Vec<u8> = Vec::new();
@@ -128,6 +128,63 @@ fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     let mut f = std::fs::File::create(&p).unwrap();
     f.write_all(bytes).unwrap();
     p
+}
+
+/// Minimal two-node GLB (Task 17 review follow-up): scene root -> "parent"
+/// -> "child". No meshes/buffers — hierarchy only, so the fixture stays a
+/// bare JSON chunk inside the GLB container (buffers are optional in glTF
+/// 2.0 when no accessor references them).
+fn build_two_node_glb() -> Vec<u8> {
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"parent","children":[1]},{"name":"child"}]}"#;
+    let json_bytes = json.as_bytes().to_vec();
+    let pad_json = (4 - json_bytes.len() % 4) % 4;
+    let total = 12 + 8 + json_bytes.len() + pad_json;
+
+    let mut glb: Vec<u8> = Vec::new();
+    glb.extend_from_slice(&0x46546C67u32.to_le_bytes()); // magic "glTF"
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    glb.extend_from_slice(&(total as u32).to_le_bytes());
+    glb.extend_from_slice(&((json_bytes.len() + pad_json) as u32).to_le_bytes());
+    glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
+    glb.extend_from_slice(&json_bytes);
+    glb.extend(std::iter::repeat_n(b' ', pad_json));
+    glb
+}
+
+/// Pins the reparent path (Task 17 review follow-up): the loader parents
+/// every node to the synthetic root first, then fixes up true parents — the
+/// child must end up under "parent" (parent field AND parent's children) and
+/// detached from the root's children list.
+#[test]
+fn two_node_glb_reparents_child_under_its_parent() {
+    let path = write_temp("hierarchy.glb", &build_two_node_glb());
+    let scene = viewer_scene::load(&path).unwrap();
+    assert_eq!(scene.nodes.len(), 3); // synthetic root + parent + child
+    let parent = scene
+        .nodes
+        .iter()
+        .position(|n| n.name.as_deref() == Some("parent"))
+        .expect("parent node created");
+    let child = scene
+        .nodes
+        .iter()
+        .position(|n| n.name.as_deref() == Some("child"))
+        .expect("child node created");
+    assert_ne!(parent, child);
+    // BFS creates the parent (scene root's child) before its child.
+    assert_eq!(scene.nodes[child].parent, Some(parent));
+    assert!(
+        !scene.nodes[scene.root].children.contains(&child),
+        "child must be detached from the synthetic root"
+    );
+    assert!(
+        scene.nodes[parent].children.contains(&child),
+        "parent.children must contain the child"
+    );
+    assert!(
+        scene.nodes[scene.root].children.contains(&parent),
+        "the top-level parent stays under the root"
+    );
 }
 
 #[test]

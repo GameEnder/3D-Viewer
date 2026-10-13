@@ -1,7 +1,8 @@
 // crates/viewer-app/src/panels.rs
-//! Overlay widgets drawn on top of the 3D viewport (Task 8: loading spinner,
-//! load-error banner), the left vertical toolbar and the right settings panel
-//! (Task 12: Lighting + Effects sections; Task 13 adds Model + Camera).
+//! Overlay widgets drawn on top of the 3D viewport (Task 8: loading spinner;
+//! Task 18: modal load-error dialog + status line), the left vertical toolbar
+//! and the right settings panel (Task 12: Lighting + Effects sections; Task 13
+//! adds Model + Camera).
 
 use eframe::egui;
 
@@ -13,17 +14,73 @@ pub fn loading_spinner(ui: &mut egui::Ui, viewport: egui::Rect) {
     ui.put(rect, egui::Spinner::new().size(40.0));
 }
 
-/// Load-failure banner along the viewport's bottom edge.
-pub fn error_banner(ui: &mut egui::Ui, viewport: egui::Rect, message: &str) {
+/// Modal load-error dialog (Task 18, replaces the Task 8 banner): a centered
+/// fixed-size window with the failure message and an OK button. The dialog is
+/// re-shown every frame while the app stays in `Failed`; `ack` is raised when
+/// OK is clicked and the app returns to Idle.
+pub fn error_dialog(ctx: &egui::Context, message: &str, ack: &mut bool) {
+    egui::Window::new("Could not open model")
+        .collapsible(false)
+        .resizable(false)
+        // An error modal must appear immediately, not fade in (also keeps
+        // its widgets opaque from the first painted frame).
+        .fade_in(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(message);
+            if ui.button("OK").clicked() {
+                *ack = true;
+            }
+        });
+}
+
+/// Status-line text for a loaded scene (Task 18): "name — N tris, M verts",
+/// with a "(N warnings)" suffix when the loader reported any (kept pure so
+/// the app can unit-test the wording).
+pub fn status_text(scene: &viewer_scene::Scene) -> String {
+    let warn = if scene.warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" ({} warnings)", scene.warnings.len())
+    };
+    format!(
+        "{} — {} tris, {} verts{}",
+        scene.source_name, scene.tri_count, scene.vert_count, warn
+    )
+}
+
+/// Status line along the viewport's bottom-left edge (Task 18): filename,
+/// triangle/vertex counts and the warning count; hovering lists the warnings
+/// one per line.
+pub fn status_line(ui: &mut egui::Ui, viewport: egui::Rect, scene: &viewer_scene::Scene) {
     let rect = egui::Rect::from_min_size(
-        viewport.left_bottom() + egui::vec2(8.0, -28.0),
-        egui::vec2((viewport.width() - 16.0).max(100.0), 24.0),
+        viewport.left_bottom() + egui::vec2(8.0, -24.0),
+        egui::vec2((viewport.width() - 16.0).max(100.0), 20.0),
+    );
+    let resp = ui.put(
+        rect,
+        egui::Label::new(egui::RichText::new(status_text(scene)).small().weak()),
+    );
+    if !scene.warnings.is_empty() {
+        resp.on_hover_text(scene.warnings.join("\n"));
+    }
+}
+
+/// Transient status note (Task 18): e.g. a screenshot save failure, shown at
+/// the viewport's bottom-left in a warning tint until the app expires it.
+/// `above_line` lifts it one row so it does not cover the Ready status line.
+pub fn status_note(ui: &mut egui::Ui, viewport: egui::Rect, text: &str, above_line: bool) {
+    let dy = if above_line { -48.0 } else { -24.0 };
+    let rect = egui::Rect::from_min_size(
+        viewport.left_bottom() + egui::vec2(8.0, dy),
+        egui::vec2((viewport.width() - 16.0).max(100.0), 20.0),
     );
     ui.put(
         rect,
         egui::Label::new(
-            egui::RichText::new(format!("Failed to load model: {message}"))
-                .color(egui::Color32::from_rgb(255, 128, 128)),
+            egui::RichText::new(text)
+                .small()
+                .color(egui::Color32::from_rgb(255, 170, 120)),
         ),
     );
 }
@@ -475,17 +532,118 @@ mod tests {
     }
 
     #[test]
-    fn error_banner_tessellates_at_bottom_edge() {
+    fn status_line_and_note_tessellate_at_bottom_left() {
         let strip =
-            egui::Rect::from_min_max(egui::pos2(0.0, 800.0 - 40.0), egui::pos2(1280.0, 800.0));
+            egui::Rect::from_min_max(egui::pos2(0.0, 800.0 - 40.0), egui::pos2(640.0, 800.0));
+        let mut scene = viewer_scene::Scene::new("teapot.glb".into());
+        scene.tri_count = 12;
+        scene.vert_count = 8;
+        let n = verts_near(|ui, vp| status_line(ui, vp, &scene), strip);
+        assert!(
+            n > 10,
+            "status line must paint at the bottom-left, got {n} vertices"
+        );
         let n = verts_near(
-            |ui, vp| error_banner(ui, vp, "nope.glb: parse error"),
+            |ui, vp| status_note(ui, vp, "Screenshot save failed: disk full", false),
             strip,
         );
         assert!(
             n > 10,
-            "error banner must paint at the bottom edge, got {n} vertices"
+            "status note must paint at the bottom-left, got {n} vertices"
         );
+    }
+
+    /// The status line counts warnings in its text ("(N warnings)" suffix);
+    /// without warnings the raw name/counts text is shown. The per-warning
+    /// listing rides egui's standard `on_hover_text` tooltip.
+    #[test]
+    fn status_text_counts_warnings() {
+        let mut scene = viewer_scene::Scene::new("m.glb".into());
+        scene.warnings = vec![
+            "baseColorTexture: bad".into(),
+            "metallicRoughnessTexture: missing".into(),
+        ];
+        assert_eq!(status_text(&scene), "m.glb — 0 tris, 0 verts (2 warnings)");
+        let clean = viewer_scene::Scene::new("m.glb".into());
+        assert_eq!(status_text(&clean), "m.glb — 0 tris, 0 verts");
+    }
+
+    /// The modal error dialog paints an OK button (its only button-fill rect)
+    /// and clicking that real geometry raises the ack flag. The dialog paints
+    /// into its own egui area layer, whose shapes arrive nested in
+    /// `Shape::Vec` — hence the recursive collector (`button_rects` only sees
+    /// the root layer's flat shapes).
+    #[test]
+    fn error_dialog_paints_message_and_ok_click_acknowledges() {
+        let ctx = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let run = |events: Vec<egui::Event>, ack: &mut bool| -> (Vec<egui::Rect>, egui::Visuals) {
+            let input = egui::RawInput {
+                screen_rect: Some(viewport),
+                events,
+                ..Default::default()
+            };
+            let mut visuals = None;
+            let out = ctx.run_ui(input, |ui| {
+                visuals = Some(ui.visuals().clone());
+                error_dialog(ui.ctx(), "FBX files are not supported", ack);
+            });
+            let mut textures_delta = out.textures_delta;
+            textures_delta.clear();
+            let v = visuals.expect("run_ui closure executed");
+            let mut rects = Vec::new();
+            fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, egui::Color32)>) {
+                match shape {
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    egui::Shape::Rect(r) => out.push((r.rect, r.fill)),
+                    _ => {}
+                }
+            }
+            for cs in &out.shapes {
+                walk(&cs.shape, &mut rects);
+            }
+            let rects = rects
+                .into_iter()
+                .filter(|(_, c)| *c == v.widgets.inactive.bg_fill)
+                .map(|(r, _)| r)
+                .collect();
+            (rects, v)
+        };
+
+        // egui 0.36 renders windows one frame late (frame 0's shapes are
+        // Noop placeholders), so warm up with a throwaway frame before
+        // inspecting geometry.
+        let mut ack = false;
+        run(vec![], &mut ack);
+
+        // Frame 1: the dialog paints exactly one button (OK).
+        let (rects, _) = run(vec![], &mut ack);
+        assert_eq!(rects.len(), 1, "the OK button is the dialog's only button");
+        assert!(!ack, "no click yet");
+        let center = rects[0].center();
+
+        // Frames 2/3: press + release on the OK button -> ack.
+        let press = vec![
+            egui::Event::PointerMoved(center),
+            egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        let release = vec![
+            egui::Event::PointerMoved(center),
+            egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        run(press, &mut ack);
+        run(release, &mut ack);
+        assert!(ack, "clicking OK must raise the ack flag");
     }
 
     /// The settings panel must paint every theme swatch with its light-0

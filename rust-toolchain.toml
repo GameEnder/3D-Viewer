@@ -1,0 +1,4 @@
+# eframe 0.36 requires rustc >= 1.95; stay on stable without pinning an
+# exact version so toolchain updates keep working (Task 1 deferred item).
+[toolchain]
+channel = "stable"

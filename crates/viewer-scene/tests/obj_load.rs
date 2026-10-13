@@ -47,3 +47,28 @@ fn missing_map_kd_pushes_warning_not_error() {
             .any(|w| w.contains("map_Kd") && w.contains("does_not_exist.png"))
     );
 }
+
+/// Task 14 ruling: the metallic branch fires on specular luminance —
+/// `0.2126*R + 0.7152*G + 0.0722*B > 0.6` maps to metallic 0.5, at or below
+/// stays 0. Ks 0.7 gray (lum 0.7) vs Ks 0.5 gray (lum 0.5) straddle the
+/// threshold; MTL order fixes material indices.
+#[test]
+fn high_ks_luminance_maps_to_metallic_half() {
+    let scene = viewer_scene::load(&fixture("metallic.obj")).unwrap();
+    assert_eq!(scene.materials.len(), 2);
+    let shiny = &scene.materials[0];
+    let dull = &scene.materials[1];
+    assert!(
+        (shiny.metallic - 0.5).abs() < 1e-6,
+        "Ks luminance 0.7 > 0.6 must map to metallic 0.5, got {}",
+        shiny.metallic
+    );
+    assert!(
+        dull.metallic.abs() < 1e-6,
+        "Ks luminance 0.5 <= 0.6 must stay metallic 0, got {}",
+        dull.metallic
+    );
+    // The meshes keep their per-usemtl materials.
+    assert_eq!(scene.meshes[0].material, 0);
+    assert_eq!(scene.meshes[1].material, 1);
+}
