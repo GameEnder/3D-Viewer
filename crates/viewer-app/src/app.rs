@@ -37,6 +37,17 @@ pub struct ViewerApp {
     /// App-level shadow override: when off, every light's `shadows` is
     /// forced false regardless of theme intensity.
     shadows_enabled: bool,
+    /// Effects toggles (Task 12) — written by the Effects panel, read every
+    /// frame into `RenderSettings`. Defaults match the original app: ground
+    /// disc + grid visible, bloom on (its `ImageProcessing.BloomEnabled`).
+    wireframe: bool,
+    ground: bool,
+    grid: bool,
+    bloom: bool,
+    /// Turntable rotation toggle (toolbar): consumed by Task 13.
+    turntable: bool,
+    /// Whether the right settings panel is shown (toolbar toggle).
+    settings_open: bool,
 }
 
 impl ViewerApp {
@@ -60,6 +71,12 @@ impl ViewerApp {
             light_mult: [1.0; 3],
             env_mult: 1.0,
             shadows_enabled: true,
+            wireframe: false,
+            ground: true,
+            grid: true,
+            bloom: true,
+            turntable: false,
+            settings_open: true,
         }
     }
 
@@ -90,10 +107,10 @@ impl ViewerApp {
             env_intensity,
             settings: RenderSettings {
                 clear_color: DEFAULT_CLEAR_COLOR,
-                wireframe: false,
-                ground: true,
-                grid: false,
-                bloom: false,
+                wireframe: self.wireframe,
+                ground: self.ground,
+                grid: self.grid,
+                bloom: self.bloom,
                 shadows: true,
                 exposure: 0.5,
                 contrast: 1.66,
@@ -191,6 +208,39 @@ impl eframe::App for ViewerApp {
             .as_ref()
             .expect("renderer created above")
             .clone();
+
+        // Left toolbar (Task 12): Open / Turntable / Screenshot / Settings.
+        // The Settings toggle gates the right settings panel; both panels run
+        // before the CentralPanel so the viewport shrinks this same frame.
+        let toolbar = panels::toolbar(ui, &mut self.turntable, &mut self.settings_open);
+        if self.settings_open {
+            panels::settings_panel(
+                ui,
+                &mut self.theme_idx,
+                &mut self.light_mult,
+                &mut self.env_mult,
+                &mut self.shadows_enabled,
+                &mut self.wireframe,
+                &mut self.ground,
+                &mut self.grid,
+                &mut self.bloom,
+            );
+        }
+
+        // Toolbar side effects: the Open request reuses open_path (worker
+        // thread + Loading state); Screenshot flips the renderer's pending
+        // flag with a brief lock (the frame-long guard is taken below; Task
+        // 13 collects the PNG). Without a renderer neither can run.
+        if let Some(path) = toolbar.open {
+            self.open_path(ui.ctx(), path);
+        }
+        if toolbar.screenshot {
+            renderer
+                .lock()
+                .expect("renderer mutex")
+                .request_screenshot();
+        }
+
         let mut r = renderer.lock().expect("renderer mutex");
 
         // Side effects collected inside the panel closure, applied after it
@@ -203,16 +253,6 @@ impl eframe::App for ViewerApp {
         let mut dolly_mult = 1.0f32;
         let mut reset = false;
         let mut aspect = 1.0f32;
-
-        // Settings panel (Task 11): mutates theme/lighting state; the frame
-        // params built below pick the change up in the same frame.
-        panels::lighting_panel(
-            ui,
-            &mut self.theme_idx,
-            &mut self.light_mult,
-            &mut self.env_mult,
-            &mut self.shadows_enabled,
-        );
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default())
@@ -303,5 +343,72 @@ impl eframe::App for ViewerApp {
             AppState::Ready(_) => ui.ctx().request_repaint(),
             AppState::Idle | AppState::Failed(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ViewerApp without GPU state: enough for the pure state →
+    /// FrameParams flow (no wgpu device in unit tests).
+    fn test_app() -> ViewerApp {
+        ViewerApp {
+            render_state: None,
+            renderer: None,
+            camera: OrbitCamera::default_for(Vec3::ZERO, 1.0),
+            state: AppState::Idle,
+            load_rx: None,
+            last_size: [0.0, 0.0],
+            theme_idx: 0,
+            light_mult: [1.0; 3],
+            env_mult: 1.0,
+            shadows_enabled: true,
+            wireframe: false,
+            ground: true,
+            grid: true,
+            bloom: true,
+            turntable: false,
+            settings_open: true,
+        }
+    }
+
+    /// Defaults match the original app: ground disc + grid visible, bloom on
+    /// (the original's ImageProcessing.BloomEnabled), wireframe off, settings
+    /// panel open, turntable off.
+    #[test]
+    fn effect_defaults_match_the_original_app() {
+        let app = test_app();
+        assert!(!app.wireframe);
+        assert!(app.ground);
+        assert!(app.grid);
+        assert!(app.bloom);
+        assert!(!app.turntable);
+        assert!(app.settings_open);
+
+        let s = app.frame_params(1.0).settings;
+        assert!(!s.wireframe);
+        assert!(s.ground);
+        assert!(s.grid);
+        assert!(s.bloom);
+        assert_eq!(s.exposure, 0.5);
+        assert_eq!(s.contrast, 1.66);
+        assert_eq!(s.ground_opacity, 0.4);
+    }
+
+    /// Every Effects toggle must reach the per-frame RenderSettings (the
+    /// panel writes the fields; frame_params reads them the same frame).
+    #[test]
+    fn effect_toggles_flow_into_frame_settings() {
+        let mut app = test_app();
+        app.wireframe = true;
+        app.ground = false;
+        app.grid = false;
+        app.bloom = false;
+        let s = app.frame_params(1.6).settings;
+        assert!(s.wireframe);
+        assert!(!s.ground);
+        assert!(!s.grid);
+        assert!(!s.bloom);
     }
 }
