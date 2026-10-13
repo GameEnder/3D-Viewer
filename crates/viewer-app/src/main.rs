@@ -2,6 +2,7 @@
 mod app;
 mod camera;
 mod paint;
+mod panels;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

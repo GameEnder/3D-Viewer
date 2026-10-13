@@ -8,6 +8,10 @@
 //! - material group 1: bindings 0-4 uniform + textures, 5 sampler
 //! - model group 2: binding 0 uniform with dynamic offset (256-byte slots)
 //!
+//! Globals extensions for ground.wgsl (Task 8; same 128-byte layout):
+//! - `flags.z`/`flags.w` carry `exposure`/`contrast` as f32 bit patterns
+//! - `pad.x` = ground opacity, `pad.yzw` = linear background color
+//!
 //! Task 7 adaptations over the plan (full list in task-7-report.md):
 //! - post.wgsl sRGB-encodes its output (runtime target is non-Srgb Bgra8Unorm)
 //!   and bypasses tonemapping for background pixels (HDR alpha < 0.5), which
@@ -24,6 +28,7 @@ use std::sync::Arc;
 
 use bytemuck::Zeroable;
 use egui_wgpu::wgpu;
+use egui_wgpu::wgpu::util::DeviceExt;
 use glam::{Mat3, Mat4, Vec3};
 use uniforms::{GlobalsU, LIGHT_COUNT, LightU, MaterialU, ModelU, PostU};
 
@@ -81,6 +86,10 @@ struct PbrPipelines {
     blend: wgpu::RenderPipeline,
 }
 
+/// Ground disc geometry: radius 2.6 model units, 64 segments (brief Step 2).
+const GROUND_SEGMENTS: u32 = 64;
+const GROUND_RADIUS: f32 = 2.6;
+
 /// Offscreen render targets recreated on resize. Only the views of the
 /// MSAA/depth targets are stored (a wgpu view pins its parent texture via an
 /// Arc); `final_tex` is kept as a handle for the screenshot copy.
@@ -124,6 +133,7 @@ struct ScreenshotJob {
 pub struct Renderer {
     target_format: wgpu::TextureFormat,
     pbr_pipelines: PbrPipelines,
+    ground_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
     material_bgl: wgpu::BindGroupLayout,
@@ -136,6 +146,14 @@ pub struct Renderer {
     post_ub: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     model_bg: wgpu::BindGroup,
+    /// Identity model bind group for the ground disc (the scene's
+    /// dynamic-offset slot 0 holds draw 0's matrix, so the disc gets its own
+    /// uniform buffer; wgpu 30 bind groups pin their buffers via Arc, so no
+    /// separate handle is stored).
+    ground_model_bg: wgpu::BindGroup,
+    ground_vb: wgpu::Buffer,
+    ground_ib: wgpu::Buffer,
+    ground_index_count: u32,
     post_bg: Option<wgpu::BindGroup>,
     post_bg_empty: wgpu::BindGroup,
     blit_bg: Option<wgpu::BindGroup>,
@@ -186,6 +204,10 @@ impl Renderer {
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+        });
+        let ground_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ground.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ground.wgsl").into()),
         });
 
         let globals_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -387,6 +409,20 @@ impl Renderer {
             "blit_pipeline",
             target_format,
         );
+        // Ground disc: same vertex layout and pass targets as the pbr
+        // pipelines, but depth-write off and alpha blended (Task 8 Step 2).
+        // Shares pbr_layout (group 1 is unused by ground.wgsl — statically
+        // unused groups need not be bound). Reuses build_pbr_pipeline, whose
+        // fixed Rgba16Float/Depth24Plus/4xMSAA match the pbr pass.
+        let ground_pipeline = build_pbr_pipeline(
+            device,
+            &pbr_layout,
+            &ground_shader,
+            "ground_pipeline",
+            None,
+            false,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
 
         // Uniform buffers.
         let globals_ub = device.create_buffer(&wgpu::BufferDescriptor {
@@ -545,6 +581,30 @@ impl Renderer {
                 }),
             }],
         });
+
+        // Ground disc mesh + constant identity model bind (brief Step 2).
+        let (ground_vb, ground_ib, ground_index_count) = build_disc_buffers(device);
+        let ground_model_ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_model_ub"),
+            contents: bytemuck::bytes_of(&ModelU {
+                model: Mat4::IDENTITY.to_cols_array_2d(),
+                normal_mat: Mat4::IDENTITY.to_cols_array_2d(),
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        // Pinned by ground_model_bg (wgpu 30).
+        let ground_model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ground_model_bg"),
+            layout: &model_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &ground_model_ub,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(size_of::<ModelU>() as u64),
+                }),
+            }],
+        });
         let post_bg_empty = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post_bg_empty"),
             layout: &post_bgl,
@@ -571,6 +631,7 @@ impl Renderer {
         Self {
             target_format,
             pbr_pipelines,
+            ground_pipeline,
             post_pipeline,
             blit_pipeline,
             material_bgl,
@@ -583,6 +644,10 @@ impl Renderer {
             post_ub,
             globals_bg,
             model_bg,
+            ground_model_bg,
+            ground_vb,
+            ground_ib,
+            ground_index_count,
             post_bg: None,
             post_bg_empty,
             blit_bg: None,
@@ -782,10 +847,17 @@ impl Renderer {
             flags: [
                 u32::from(params.settings.wireframe),
                 u32::from(params.settings.grid),
-                0,
-                0,
+                // ground.wgsl derives the tonemap-survival threshold from
+                // exposure/contrast; bitcast through the unused u32 slots.
+                params.settings.exposure.to_bits(),
+                params.settings.contrast.to_bits(),
             ],
-            pad: [0.0; 4],
+            pad: [
+                params.settings.ground_opacity,
+                params.settings.clear_color[0],
+                params.settings.clear_color[1],
+                params.settings.clear_color[2],
+            ],
         };
         queue.write_buffer(&self.globals_ub, 0, bytemuck::bytes_of(&globals));
 
@@ -823,8 +895,9 @@ impl Renderer {
                 queue.write_buffer(&self.model_ub, (slot * 256) as u64, bytemuck::bytes_of(&mu));
             }
 
-            // Draw order: opaque first (any order, depth-tested), then blend
-            // far->near by squared distance from the camera.
+            // Draw order: opaque first (any order, depth-tested), then the
+            // ground disc (Task 8: after opaques, before blend meshes), then
+            // blend meshes far->near by squared distance from the camera.
             let cam = Vec3::from_array(params.camera_pos);
             let world_center =
                 |i: usize| (spin * world[gs.draws[i].1]).transform_point3(Vec3::ZERO);
@@ -844,6 +917,24 @@ impl Renderer {
                     (false, false) => Ordering::Equal,
                 }
             });
+            // The sort places every non-blend draw before every blend draw,
+            // so the ground slots in at the first blend draw.
+            let blend_start = order
+                .iter()
+                .position(|&d| gs.meshes[gs.draws[d].0].blend)
+                .unwrap_or(order.len());
+
+            enum DrawStep {
+                Mesh(usize),
+                Ground,
+            }
+            let ground_draw = params.settings.ground && params.settings.ground_opacity > 0.0;
+            let steps = order[..blend_start]
+                .iter()
+                .copied()
+                .map(DrawStep::Mesh)
+                .chain(ground_draw.then_some(DrawStep::Ground))
+                .chain(order[blend_start..].iter().copied().map(DrawStep::Mesh));
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pbr_pass"),
@@ -870,30 +961,42 @@ impl Renderer {
             });
 
             let mut current: Option<&wgpu::RenderPipeline> = None;
-            for &d in &order {
-                let (mesh_idx, _node_idx) = gs.draws[d];
-                let mesh = &gs.meshes[mesh_idx];
-                let pipe = if mesh.blend {
-                    &self.pbr_pipelines.blend
-                } else if mesh.double_sided {
-                    &self.pbr_pipelines.double_sided
-                } else {
-                    &self.pbr_pipelines.opaque
-                };
-                if current != Some(pipe) {
-                    pass.set_pipeline(pipe);
-                    current = Some(pipe);
+            for step in steps {
+                match step {
+                    DrawStep::Ground => {
+                        pass.set_pipeline(&self.ground_pipeline);
+                        pass.set_bind_group(0, &self.globals_bg, &[]);
+                        pass.set_bind_group(2, &self.ground_model_bg, &[0]);
+                        pass.set_vertex_buffer(0, self.ground_vb.slice(..));
+                        pass.set_index_buffer(self.ground_ib.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..self.ground_index_count, 0, 0..1);
+                    }
+                    DrawStep::Mesh(d) => {
+                        let (mesh_idx, _node_idx) = gs.draws[d];
+                        let mesh = &gs.meshes[mesh_idx];
+                        let pipe = if mesh.blend {
+                            &self.pbr_pipelines.blend
+                        } else if mesh.double_sided {
+                            &self.pbr_pipelines.double_sided
+                        } else {
+                            &self.pbr_pipelines.opaque
+                        };
+                        if current != Some(pipe) {
+                            pass.set_pipeline(pipe);
+                            current = Some(pipe);
+                        }
+                        pass.set_bind_group(0, &self.globals_bg, &[]);
+                        let mat = gs
+                            .materials
+                            .get(mesh.material)
+                            .expect("every referenced material uploaded");
+                        pass.set_bind_group(1, &mat.bind_group, &[]);
+                        pass.set_bind_group(2, &self.model_bg, &[(d * 256) as u32]);
+                        pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                        pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    }
                 }
-                pass.set_bind_group(0, &self.globals_bg, &[]);
-                let mat = gs
-                    .materials
-                    .get(mesh.material)
-                    .expect("every referenced material uploaded");
-                pass.set_bind_group(1, &mat.bind_group, &[]);
-                pass.set_bind_group(2, &self.model_bg, &[(d * 256) as u32]);
-                pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
-                pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
 
@@ -1268,6 +1371,49 @@ fn normal_matrix(model: Mat4) -> Mat4 {
     } else {
         Mat4::from_mat3(m3.inverse().transpose())
     }
+}
+
+/// Ground disc mesh (Task 8 Step 2): fan at `GROUND_RADIUS` in the XZ plane
+/// with `GROUND_SEGMENTS` segments — 65 vertices (center + rim) plus a fan
+/// index buffer wound CCW when viewed from +Y. `uv.x` carries the radial
+/// coordinate 0..1 for ground.wgsl's falloff. The barycentric attribute is
+/// part of the fixed 44-byte layout but unused by ground.wgsl (values are
+/// don't-care; indexed fan vertices cannot carry per-corner barycentrics).
+fn build_disc_buffers(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+    let mut verts = Vec::with_capacity((GROUND_SEGMENTS + 1) as usize);
+    verts.push(uniforms::Vertex {
+        pos: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        uv: [0.0, 0.0],
+        bary: uniforms::BARY[0],
+    });
+    for i in 0..GROUND_SEGMENTS {
+        let a = (i as f32) / (GROUND_SEGMENTS as f32) * std::f32::consts::TAU;
+        verts.push(uniforms::Vertex {
+            pos: [GROUND_RADIUS * a.cos(), 0.0, GROUND_RADIUS * a.sin()],
+            normal: [0.0, 1.0, 0.0],
+            uv: [1.0, 0.0],
+            bary: uniforms::BARY[1],
+        });
+    }
+    let mut indices = Vec::with_capacity((GROUND_SEGMENTS * 3) as usize);
+    for i in 0..GROUND_SEGMENTS {
+        let next = (i + 1) % GROUND_SEGMENTS;
+        // (center, rim_next, rim_cur) faces +Y so the disc is front-facing
+        // from above.
+        indices.extend_from_slice(&[0, 1 + next, 1 + i]);
+    }
+    let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("ground_vertices"),
+        contents: bytemuck::cast_slice(&verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("ground_indices"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    (vb, ib, indices.len() as u32)
 }
 
 #[cfg(test)]

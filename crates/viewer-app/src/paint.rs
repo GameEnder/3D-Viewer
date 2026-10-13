@@ -6,6 +6,7 @@ use egui_wgpu::{CallbackResources, CallbackTrait, RenderState};
 use viewer_render::Renderer;
 
 /// Shared between app update() and the wgpu paint callbacks.
+#[derive(Clone)]
 pub struct SharedRenderer(pub Arc<Mutex<Renderer>>);
 
 /// Insert the shared renderer into egui_wgpu's callback resources once at

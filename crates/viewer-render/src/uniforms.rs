@@ -10,8 +10,8 @@ pub struct GlobalsU {
     pub view_proj: [[f32; 4]; 4], // 0
     pub camera_pos: [f32; 4],     // 64  xyz + unused
     pub env_color: [f32; 4],      // 80  rgb + intensity
-    pub flags: [u32; 4],          // 96  x=wireframe, y=grid, z=unused, w=unused
-    pub pad: [f32; 4],            // 112
+    pub flags: [u32; 4], // 96  x=wireframe, y=grid, z=exposure bits, w=contrast bits (ground.wgsl)
+    pub pad: [f32; 4],   // 112 x=ground opacity, yzw=background rgb linear (ground.wgsl)
 } // 128
 
 #[repr(C)]

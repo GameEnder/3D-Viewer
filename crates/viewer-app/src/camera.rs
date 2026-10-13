@@ -126,4 +126,28 @@ mod tests {
         let outside = vp * (c.eye() + fwd * 0.04).extend(1.0);
         assert!(outside.z / outside.w < 0.0);
     }
+
+    #[test]
+    fn double_click_reset_restores_fit_view() {
+        // The app's double-click reset re-runs fit() with the scene bounds;
+        // that must land on exactly the same camera as the initial load fit,
+        // regardless of how far orbit/pan/dolly moved it in between.
+        let center = Vec3::new(0.0, 0.577, 0.0);
+        let mut loaded = OrbitCamera::default_for(Vec3::ZERO, 1.0);
+        loaded.fit(center, 1.0);
+        let mut moved = loaded;
+        for i in 0..12 {
+            moved.orbit(14.0 - i as f32, 6.0 + i as f32);
+            moved.pan(20.0 - i as f32, 3.0, 1.6);
+            moved.dolly(0.9 + 0.05 * i as f32);
+        }
+        assert!(moved.distance != loaded.distance || moved.rotation_deg != loaded.rotation_deg);
+        moved.fit(center, 1.0);
+        assert_eq!(moved.target, loaded.target);
+        assert_eq!(moved.distance, loaded.distance);
+        assert_eq!(moved.elevation_deg, loaded.elevation_deg);
+        assert_eq!(moved.rotation_deg, loaded.rotation_deg);
+        assert_eq!(moved.fov_y_deg, loaded.fov_y_deg);
+        assert_eq!(moved.view_proj(1.6), loaded.view_proj(1.6));
+    }
 }
