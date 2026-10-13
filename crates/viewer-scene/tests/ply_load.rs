@@ -127,6 +127,71 @@ fn ply_without_color_properties_uses_default_material() {
     assert_eq!(s.materials[0].base_color, [0.8, 0.8, 0.8, 1.0]);
 }
 
+// f64::MAX (0x7FEFFFFFFFFFFFFF) little-endian: parses as a garbage list count
+// whose `as usize` cast saturates to usize::MAX, exercising overflow-safe
+// skip arithmetic. (All-0xFF mantissa with 0x7FF exponent would be NaN → 0.)
+const F64_MAX_LE: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEF, 0x7F];
+
+fn binary_ply_with_unknown_element(junk_props: &str, junk_body: &[u8]) -> Vec<u8> {
+    let header = format!(
+        "ply
+format binary_little_endian 1.0
+element vertex 1
+property float x
+property float y
+property float z
+element junk 1
+{junk_props}end_header
+"
+    );
+    let mut b = header.into_bytes();
+    b.extend_from_slice(&0.5f32.to_le_bytes());
+    b.extend_from_slice(&0.5f32.to_le_bytes());
+    b.extend_from_slice(&0.5f32.to_le_bytes());
+    b.extend_from_slice(junk_body);
+    b
+}
+
+fn assert_ply_truncated_error(bytes: &[u8], name: &str) {
+    let dir = std::env::temp_dir().join("viewer-ply-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(name);
+    std::fs::write(&p, bytes).unwrap();
+    let err = viewer_scene::load(&p).map(|_| ()).unwrap_err();
+    assert!(
+        err.to_string().contains("truncated binary data"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn binary_unknown_element_f64_list_garbage_count_errors_not_overflows() {
+    let b = binary_ply_with_unknown_element("property list double uchar blob\n", &F64_MAX_LE);
+    assert_ply_truncated_error(&b, "bin-ovf-list.ply");
+}
+
+#[test]
+fn binary_unknown_element_two_f64_lists_garbage_counts_errors_not_overflows() {
+    let mut body = F64_MAX_LE.to_vec();
+    body.extend_from_slice(&F64_MAX_LE);
+    let b = binary_ply_with_unknown_element(
+        "property list double uchar blob\nproperty list double uchar blob2\n",
+        &body,
+    );
+    assert_ply_truncated_error(&b, "bin-ovf-list-list.ply");
+}
+
+#[test]
+fn binary_unknown_element_f64_list_then_scalar_errors_not_overflows() {
+    let mut body = F64_MAX_LE.to_vec();
+    body.extend_from_slice(&F64_MAX_LE);
+    let b = binary_ply_with_unknown_element(
+        "property list double uchar blob\nproperty double pad\n",
+        &body,
+    );
+    assert_ply_truncated_error(&b, "bin-ovf-list-scalar.ply");
+}
+
 #[test]
 fn ply_without_faces_is_point_soup() {
     let dir = std::env::temp_dir().join("viewer-ply-tests");

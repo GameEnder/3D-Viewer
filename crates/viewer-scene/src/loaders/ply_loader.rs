@@ -366,7 +366,7 @@ fn parse_ascii(bytes: &[u8], header: &Header) -> Result<PlyData, LoadError> {
 
 fn read_num(bytes: &[u8], off: usize, t: Scalar) -> Result<f64, LoadError> {
     let n = t.size();
-    if off + n > bytes.len() {
+    if off.saturating_add(n) > bytes.len() {
         return Err(bad("truncated binary data"));
     }
     let b = &bytes[off..off + n];
@@ -466,11 +466,14 @@ fn parse_binary(bytes: &[u8], header: &Header) -> Result<PlyData, LoadError> {
                 for _ in 0..elem.count {
                     for prop in &elem.props {
                         match prop.kind {
-                            PropKind::Scalar(t) => off += t.size(),
+                            PropKind::Scalar(t) => off = off.saturating_add(t.size()),
                             PropKind::List { count, index } => {
                                 let n = read_num(bytes, off, count)? as usize;
+                                // garbage counts can be ~usize::MAX; saturate
+                                // instead of overflowing the size sum
                                 off = off
-                                    .saturating_add(count.size() + n.saturating_mul(index.size()));
+                                    .saturating_add(count.size())
+                                    .saturating_add(n.saturating_mul(index.size()));
                             }
                         }
                     }
