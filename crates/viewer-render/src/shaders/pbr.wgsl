@@ -184,9 +184,13 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
     col = mix(col, vec3<f32>(0.05, 0.06, 0.09), line * 0.9);
   }
   // Task 7 adaptation: the resolved HDR buffer's alpha doubles as a background
-  // marker for post.wgsl (0 = background/clear color, >= 0.5 = tonemapped scene).
-  // Opaque/mask draws count as full coverage; blend draws carry material alpha
-  // so post.wgsl can approximate "mostly background" under very transparent frags.
-  let alpha_out = select(1.0, base.a, M.mode.x == 2u);
+  // marker for post.wgsl (dst alpha < 0.5 = background -> untonemapped clear
+  // color; >= 0.5 = tonemapped scene). Opaque/mask draws write 1.0 (full
+  // coverage). Blend draws are floored at 0.5 so their fragment contribution
+  // always takes the tonemap branch — a blend fragment that only partially
+  // covers the background must NOT be classified as background, or post.wgsl
+  // would discard its rgb contribution entirely (e.g. Task 8's ground plane at
+  // opacity 0.4 would be invisible over the background).
+  let alpha_out = select(1.0, max(base.a, 0.5), M.mode.x == 2u);
   return vec4<f32>(col, alpha_out);
 }
