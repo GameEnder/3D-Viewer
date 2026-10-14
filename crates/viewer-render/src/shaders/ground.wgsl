@@ -30,10 +30,13 @@
 //    (c-0.5)*contrast+0.5, which clamps anything dimmer than the background to
 //    pure black — the brief's falloff-to-zero would end in a black ring at the
 //    disc rim (HDR composite → bg ≈ 0.06 is far below the black-clamp
-//    threshold). The fragment lifts the effective opacity so the composite
-//    never drops below T_BG, the HDR value post.wgsl maps back to the
-//    displayed background color; the rim therefore fades into the background
-//    and the disc fades out seamlessly. T_BG is derived in-shader
+//    threshold). The fragment floors rgb_out at T_BG, the HDR value post.wgsl
+//    maps back to the displayed background color, so the blended composite
+//    never sinks below T_BG whatever the effective alpha; the rim therefore
+//    fades into the background and the disc fades out seamlessly. (Task 8's
+//    opacity lift was removed in Task 18b — once the falloff darkened the rim
+//    below the background, its col > bg assumption broke; see the fs_main
+//    comment.) T_BG is derived in-shader
 //    from the exposure/contrast carried in flags.zw, so user settings stay
 //    honored. (Known limitation: where the disc's own shaded color is dimmer
 //    than T_BG — only reachable with non-default lighting/exposure — the

@@ -64,7 +64,6 @@ impl OrbitCamera {
         self.distance = (self.distance / mult.max(0.01)).clamp(0.4, 30.0);
     }
 
-    #[allow(dead_code)] // unwired until Task 8+ adds pan input
     pub fn pan(&mut self, dx: f32, dy: f32, aspect: f32) {
         let scale = self.distance * (self.fov_y_deg.to_radians() * 0.5).tan() / 500.0;
         let view = self.view_matrix();

@@ -118,6 +118,19 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
             duration = duration.max(times.last().copied().unwrap_or(0.0));
             let mut keys = read_keyframes(&sampler.output(), &buffers, interpolation, property)?;
             keys.times = times;
+            // anim_eval indexes k.values[i]/[j] by times segment indices, so a
+            // sampler whose output accessor carries a different key count than
+            // its input would panic (or NaN) during playback. Reject at load.
+            if keys.values.len() != keys.times.len() {
+                return Err(LoadError::Parse {
+                    format: "glTF",
+                    detail: format!(
+                        "animation sampler output count {} != input time count {}",
+                        keys.values.len(),
+                        keys.times.len()
+                    ),
+                });
+            }
             channels.push(Channel {
                 node: our_node,
                 property,
@@ -267,6 +280,21 @@ fn convert_primitive(
         .read_indices()
         .map(|r| r.into_u32().collect())
         .unwrap_or_else(|| (0..positions.len() as u32).collect());
+    // Malformed files can carry an index accessor referencing vertices beyond
+    // POSITION — the GPU upload (gpu_scene::upload, m.positions[vi]) and even
+    // normalize's bounds pass would panic on it. Reject at load, like the
+    // PLY/3MF loaders do for their face indices.
+    for &ix in &indices {
+        if ix as usize >= positions.len() {
+            return Err(LoadError::Parse {
+                format: "glTF",
+                detail: format!(
+                    "primitive index out of range: index {ix} >= {} POSITION vertices",
+                    positions.len()
+                ),
+            });
+        }
+    }
     let material = prim
         .material()
         .index()
@@ -358,7 +386,18 @@ fn read_keyframes(
     match interpolation {
         Interpolation::CubicSpline => {
             // glTF layout per key: [in-tangent, value, out-tangent] (spec §5.8.2).
-            // The output accessor's element count is 3x the number of keys.
+            // The output accessor's element count is 3x the number of keys, and
+            // the spec requires at least 2 keys. Malformed counts would truncate
+            // to empty/short values and NaN transforms during playback.
+            if !acc.count().is_multiple_of(3) || acc.count() < 6 {
+                return Err(LoadError::Parse {
+                    format: "glTF",
+                    detail: format!(
+                        "CUBICSPLINE output accessor holds {} elements; expected 3 per key for at least 2 keys (>= 6)",
+                        acc.count()
+                    ),
+                });
+            }
             let n = acc.count() / 3;
             let mut values = Vec::with_capacity(n);
             let mut in_t = Vec::with_capacity(n);
