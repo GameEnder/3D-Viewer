@@ -81,6 +81,240 @@ fn sample(img: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
     [img[i], img[i + 1], img[i + 2], img[i + 3]]
 }
 
+/// A single large triangle FACING the harness camera (sparse wireframe
+/// probe). The calibration camera orbits at rotation -90 (eye ~ (-3, 1.15, 0)
+/// looking along +X), so the triangle lives in the Y/Z plane at x = -0.5;
+/// a z=0 "vertical" triangle is viewed EDGE-ON there and never rasterizes
+/// (the first probe version measured the background gradient instead).
+fn big_triangle_scene() -> Arc<viewer_scene::Scene> {
+    let mut scene = viewer_scene::Scene::new("big_tri".into());
+    scene.materials.push(viewer_scene::Material::default_pbr());
+    let mesh = viewer_scene::Mesh {
+        positions: vec![[-0.5, -0.8, -0.8], [-0.5, -0.8, 0.8], [-0.5, 0.9, 0.0]],
+        normals: vec![[1.0, 0.0, 0.0]; 3],
+        uvs: vec![],
+        indices: vec![0, 1, 2],
+        material: 0,
+    };
+    let node = scene.add_node(scene.root, viewer_scene::Trs::identity(), None);
+    let mi = scene.add_mesh(mesh);
+    scene.nodes[node].meshes.push(mi);
+    scene.bounds = viewer_scene::Aabb {
+        min: glam::Vec3::new(-0.5, -0.8, -0.8),
+        max: glam::Vec3::new(-0.5, 0.9, 0.8),
+    };
+    Arc::new(scene)
+}
+
+/// A dense subdivided grid whose triangles are sub-pixel at the harness
+/// camera (dense wireframe probe — reproduces the user-reported "wireframe
+/// makes the model blue" on the 1.15M-triangle bird).
+fn dense_grid_scene(n: u32) -> Arc<viewer_scene::Scene> {
+    let mut scene = viewer_scene::Scene::new("dense".into());
+    scene.materials.push(viewer_scene::Material::default_pbr());
+    let half = 0.7f32;
+    let step = 2.0 * half / n as f32;
+    // Grid of (n x n) quads -> 2 triangles each, as an index buffer.
+    let mut positions = Vec::new();
+    let mut indices = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            let x = -half + step * i as f32;
+            let z = -half + step * j as f32;
+            positions.push([x, 0.0, z]);
+        }
+    }
+    let stride = n + 1;
+    for j in 0..n {
+        for i in 0..n {
+            let v = |a: u32, b: u32| b * stride + a;
+            let (a, b, c, d) = (v(i, j), v(i + 1, j), v(i, j + 1), v(i + 1, j + 1));
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    let mesh = viewer_scene::Mesh {
+        positions,
+        normals: vec![[0.0, 1.0, 0.0]; ((n + 1) * (n + 1)) as usize],
+        uvs: vec![],
+        indices,
+        material: 0,
+    };
+    let node = scene.add_node(scene.root, viewer_scene::Trs::identity(), None);
+    let mi = scene.add_mesh(mesh);
+    scene.nodes[node].meshes.push(mi);
+    scene.bounds = viewer_scene::Aabb {
+        min: glam::Vec3::new(-half, 0.0, -half),
+        max: glam::Vec3::new(half, 0.0, half),
+    };
+    Arc::new(scene)
+}
+
+/// Render `scene` with the given wireframe flag and return
+/// (mean_gray, mean_r, mean_b) of the central 120x120 region (the surface
+/// fills it at the harness camera).
+fn mean_center_gray(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: Arc<viewer_scene::Scene>,
+    wireframe: bool,
+) -> (f32, f32, f32) {
+    let (w, h) = (400u32, 300u32);
+    let mut renderer = viewer_render::Renderer::new(device, wgpu::TextureFormat::Bgra8Unorm);
+    renderer.resize(device, w, h);
+    renderer.set_scene(device, queue, scene);
+    let lights = default_rig();
+    let lights = lights.map(|mut l| {
+        l.shadows = false;
+        l
+    });
+    renderer.queue_frame(viewer_render::FrameParams {
+        view_proj: calibration_camera(w, h),
+        camera_pos: [0.0, 0.85, 3.1],
+        turntable_deg: 0.0,
+        model_scale: 1.0,
+        lights,
+        env_color: [srgb_to_linear(1.0); 3],
+        env_intensity: 0.4,
+        anim: None,
+        settings: viewer_render::RenderSettings {
+            clear_color: viewer_render::DEFAULT_CLEAR_COLOR,
+            wireframe,
+            ground: false,
+            grid: false,
+            bloom: false,
+            exposure: 0.5,
+            contrast: 1.66,
+            ground_opacity: 0.4,
+            shadows: false,
+        },
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.request_screenshot();
+    renderer.prepare_render(device, queue, &mut encoder);
+    queue.submit(Some(encoder.finish()));
+    let img = renderer
+        .collect_screenshot(device)
+        .expect("screenshot readback");
+    let rgba = img.into_raw();
+    let (x0, y0, x1, y1) = (140u32, 90u32, 260u32, 210u32);
+    let (mut sum, mut sr, mut sb, mut count) = (0.0f32, 0.0f32, 0.0f32, 0u32);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = sample(&rgba, w, x, y);
+            sum += (p[0] as u32 + p[1] as u32 + p[2] as u32) as f32 / 3.0;
+            sr += p[0] as f32;
+            sb += p[2] as f32;
+            count += 1;
+        }
+    }
+    let n = count as f32;
+    (sum / n, sr / n, sb / n)
+}
+
+#[test]
+#[ignore = "headless GPU probe; run with --ignored"]
+fn wireframe_sparse_triangle_shows_structure() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("no GPU adapter");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&Default::default())).expect("no GPU device");
+
+    // Sparse triangle: the wireframe must show BOTH dark edge pixels and
+    // bright shaded interior pixels (structure, not a uniform wash).
+    let img_mean_dark = {
+        let (w, h) = (400u32, 300u32);
+        let mut renderer = viewer_render::Renderer::new(&device, wgpu::TextureFormat::Bgra8Unorm);
+        renderer.resize(&device, w, h);
+        renderer.set_scene(&device, &queue, big_triangle_scene());
+        let mut lights = default_rig();
+        for l in &mut lights {
+            l.shadows = false;
+        }
+        renderer.queue_frame(viewer_render::FrameParams {
+            view_proj: calibration_camera(w, h),
+            camera_pos: [0.0, 0.85, 3.1],
+            turntable_deg: 0.0,
+            model_scale: 1.0,
+            lights,
+            env_color: [srgb_to_linear(1.0); 3],
+            env_intensity: 0.4,
+            anim: None,
+            settings: viewer_render::RenderSettings {
+                clear_color: viewer_render::DEFAULT_CLEAR_COLOR,
+                wireframe: true,
+                ground: false,
+                grid: false,
+                bloom: false,
+                exposure: 0.5,
+                contrast: 1.66,
+                ground_opacity: 0.4,
+                shadows: false,
+            },
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.request_screenshot();
+        renderer.prepare_render(&device, &queue, &mut encoder);
+        queue.submit(Some(encoder.finish()));
+        let img = renderer
+            .collect_screenshot(&device)
+            .expect("screenshot readback");
+        img.into_raw()
+    };
+    let (mut min_g, mut max_g) = (255u32, 0u32);
+    for y in 0..300 {
+        for x in 0..400 {
+            let p = sample(&img_mean_dark, 400, x, y);
+            let g = (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3;
+            min_g = min_g.min(g);
+            max_g = max_g.max(g);
+        }
+    }
+    println!("sparse wireframe (full frame): min {min_g}, max {max_g}");
+    assert!(
+        min_g < 70 && max_g > 110,
+        "sparse wireframe must show dark edges AND a shaded interior \
+         (min {min_g}, max {max_g})"
+    );
+}
+
+#[test]
+#[ignore = "headless GPU probe; run with --ignored"]
+fn wireframe_dense_surface_keeps_shading() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("no GPU adapter");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&Default::default())).expect("no GPU device");
+
+    let scene = dense_grid_scene(160); // 51,200 sub-pixel triangles
+    let (plain, _, _) = mean_center_gray(&device, &queue, scene.clone(), false);
+    let (wire, mr, mb) = mean_center_gray(&device, &queue, scene, true);
+    println!("dense mean: plain {plain:.1}, wireframe {wire:.1} (r {mr:.1} vs b {mb:.1})");
+    // The user-reported bug: dense + wireframe washed the WHOLE surface into
+    // the dark BLUE line color — the surface must keep both shading AND hue.
+    assert!(
+        wire >= 0.4 * plain,
+        "dense wireframe washes out the surface: plain {plain:.1} vs \
+         wireframe {wire:.1}"
+    );
+    assert!(
+        (mr - mb).abs() <= 6.0,
+        "dense wireframe must stay hue-neutral (r {mr:.1} vs b {mb:.1} — \
+         the old flat dark-blue line color tinted the model blue)"
+    );
+}
+
 #[test]
 #[ignore = "headless GPU calibration harness; run with --ignored"]
 fn calibration_measurements() {

@@ -95,9 +95,15 @@ pub struct ToolbarOutcome {
     pub screenshot: bool,
 }
 
-/// The left vertical toolbar (~56px): Open, Turntable (toggle), Screenshot,
+/// The left vertical toolbar: Open, Turntable (toggle), Screenshot,
 /// Settings (toggles the right settings panel). Turntable/Screenshot are
-/// inert until Task 13 — they set state only.
+/// inert until Task 13 - they set state only.
+///
+/// Width: sized for the widest label ("Screenshot", 44.8px at the small font)
+/// plus egui's button + panel margins, so no label ever wraps mid-word
+/// (user-reported bug: at 56px the labels wrapped to "Turntab/le" etc.).
+pub const TOOLBAR_WIDTH: f32 = 76.0;
+
 pub fn toolbar(
     ui: &mut egui::Ui,
     turntable: &mut bool,
@@ -109,7 +115,7 @@ pub fn toolbar(
     };
     egui::Panel::left("toolbar")
         .resizable(false)
-        .exact_size(56.0)
+        .exact_size(TOOLBAR_WIDTH)
         .show(ui, |ui| {
             let w = ui.available_width();
             if ui
@@ -426,6 +432,42 @@ fn camera_section(ui: &mut egui::Ui, c: CameraSection<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// User-reported bug: at 56px the toolbar labels wrapped mid-word
+    /// ("Turntab/le", "Screens/hot"). The panel must be wide enough for the
+    /// widest label ("Screenshot") laid out on ONE line at the small font,
+    /// with room for egui's panel + button margins.
+    #[test]
+    fn toolbar_width_fits_the_widest_label_on_one_line() {
+        let ctx = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(viewport),
+            ..Default::default()
+        };
+        let widest = std::cell::RefCell::new(0.0f32);
+        let out = ctx.run_ui(input, |ui| {
+            for label in ["Open", "Turntable", "Screenshot", "Settings"] {
+                let g = ui.painter().layout_no_wrap(
+                    label.to_string(),
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    egui::Color32::WHITE,
+                );
+                let cur = widest.borrow().to_owned();
+                widest.replace(cur.max(g.size().x));
+            }
+        });
+        let mut textures_delta = out.textures_delta;
+        textures_delta.clear();
+        let widest = widest.into_inner();
+        // 16px: egui side-panel margins (8 left + 8 right); 14px: button frame
+        // margins + rounding slack.
+        assert!(
+            TOOLBAR_WIDTH >= widest + 30.0,
+            "toolbar width {TOOLBAR_WIDTH} too narrow for the widest label \
+             ({widest:.1}px) - labels wrap mid-word"
+        );
+    }
 
     /// The bottom animation bar paints widgets in the bottom strip only when
     /// it is called (the app shows it only for scenes WITH animations), and
@@ -810,8 +852,8 @@ mod tests {
         buttons.sort_by(|a, b| a.top().total_cmp(&b.top()));
         for r in &buttons {
             assert!(
-                r.right() <= 57.0 && r.left() >= -0.5,
-                "button must stay inside the ~56px left strip: {r:?}"
+                r.right() <= TOOLBAR_WIDTH + 1.0 && r.left() >= -0.5,
+                "button must stay inside the {TOOLBAR_WIDTH}px left strip: {r:?}"
             );
         }
         for w in buttons.windows(2) {
