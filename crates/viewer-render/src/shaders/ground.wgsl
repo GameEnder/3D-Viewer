@@ -134,8 +134,13 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
         else { vis = pcf_g(shadow2, uv, sp.z, texel); }
       }
     }
-    col += vec3<f32>(0.55) * L[i].color.rgb * L[i].pos.w * 8.0 / (dist * dist + 1.0) * n_dot_l * vis / 3.14159265;
+    col += vec3<f32>(0.55) * L[i].color.rgb * L[i].pos.w * 1.5 / (dist * dist + 1.0) * n_dot_l * vis / 3.14159265;
   }
+  // Task 18b: radial pool falloff calibrated to the original app's ground
+  // (encoded pool ~119/255 at the center darkening to ~37/255 at the disc
+  // edge, ratio ~0.31). Applied before the grid so grid lines sit on the
+  // darkened ground.
+  col *= mix(1.0, 0.31, smoothstep(0.05, 0.9, radial));
   if (G.flags.y == 1u) { // grid overlay
     let g = abs(fract(f.world.xz * 2.0 - 0.5) - 0.5) / max(fwidth(f.world.xz * 2.0), vec2<f32>(1e-5));
     let line = 1.0 - min(min(g.x, g.y), 1.0);

@@ -5,19 +5,20 @@
 // Task 7 adaptations (documented in task-7-report.md):
 // 1. The runtime framebuffer is Bgra8Unorm (non-Srgb), so this shader
 //    sRGB-encodes its output itself (controller ruling from Task 2).
-// 2. Background pixels (HDR alpha < 0.5, i.e. the cleared color) bypass tone
-//    mapping and output the theme clear color directly. ACES + contrast would
-//    otherwise crush the dark clear color to pure black, contradicting the
-//    ported constant rgb(69,74,80). Clear color arrives in PostU as LINEAR rgb.
+// 2. Background pixels (HDR alpha < 0.5) bypass tone mapping: ACES + contrast
+//    would otherwise crush the dark background to pure black. Since Task 18b
+//    the HDR already holds the radial background gradient drawn by the
+//    background quad, so the bypass branch simply re-encodes s.rgb - the
+//    gradient round-trips rgba16f losslessly and no bg uniform is needed.
 // 3. Bloom stays in the brief's position (added in HDR-linear space before
-//    tonemapping); note it only shows on scene pixels until Task 10 revisits.
+//    tonemapping); the is_bg branch discards it, so background pixels stay
+//    bloom-free.
 
 struct PostU {
   exposure: f32,
   contrast: f32,
   bloom_weight: f32,
   pad: f32,
-  clear_color: vec4<f32>, // linear rgb of the theme background
 };
 @group(0) @binding(0) var scene_tex: texture_2d<f32>;   // resolved HDR rgba16f
 @group(0) @binding(1) var bloom_tex: texture_2d<f32>;   // half-res chain result (dummy 1x1 black in Task 7)
@@ -58,9 +59,10 @@ fn fs_main(v: VOut) -> @location(0) vec4<f32> {
   col = aces(col);
   col = (col - vec3<f32>(0.5)) * P.contrast + vec3<f32>(0.5);
   col = clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
-  // background bypass: the PBR pass clears HDR alpha to 0 and scene draws
-  // write alpha >= material alpha, so 0.5 separates background from scene.
+  // background bypass: the background quad clears HDR alpha to 0 and scene
+  // draws write alpha >= material alpha, so 0.5 separates background from
+  // scene. The HDR already holds the linear gradient there - re-encode it.
   let is_bg = s.a < 0.5;
-  let out = select(col, clamp(P.clear_color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<bool>(is_bg));
+  let out = select(col, clamp(s.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<bool>(is_bg));
   return vec4<f32>(srgb_encode(out), 1.0);
 }

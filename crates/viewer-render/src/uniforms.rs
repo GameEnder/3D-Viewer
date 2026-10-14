@@ -44,10 +44,10 @@ pub struct MaterialU {
 
 /// Post-process uniforms.
 ///
-/// Task 7 adaptation: `clear_color` (linear rgb of the theme background) was
-/// added so post.wgsl can output the untouched theme color for background
-/// pixels (HDR alpha < 0.5). ACES + contrast would otherwise crush the dark
-/// clear color to black, contradicting the ported constant rgb(69,74,80).
+/// Task 18b: the visible background is the radial gradient drawn into the HDR
+/// by the background quad (alpha 0 marker); post.wgsl's background branch just
+/// re-encodes whatever the HDR holds there, so PostU no longer carries the
+/// clear color (the gradient constants live in the `BgU` uniform instead).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct PostU {
@@ -55,7 +55,16 @@ pub struct PostU {
     pub contrast: f32,
     pub bloom_weight: f32,
     pub pad: f32,
-    pub clear_color: [f32; 4], // rgb linear + unused
+} // 16
+
+/// Background gradient uniforms (Task 18b): linear rgb of the viewport
+/// gradient at its center and corners, drawn by the background quad in the
+/// scene pass so ground/blend pixels blend against the true gradient.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct BgU {
+    pub center: [f32; 4], // linear rgb + pad
+    pub edge: [f32; 4],   // linear rgb + pad
 } // 32
 
 #[repr(C)]
@@ -90,7 +99,12 @@ mod tests {
     }
 
     #[test]
-    fn post_u_carries_clear_color() {
-        assert_eq!(size_of::<PostU>(), 32);
+    fn post_u_is_16_bytes() {
+        assert_eq!(size_of::<PostU>(), 16);
+    }
+
+    #[test]
+    fn bg_u_is_32_bytes() {
+        assert_eq!(size_of::<BgU>(), 32);
     }
 }

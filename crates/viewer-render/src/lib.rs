@@ -18,10 +18,17 @@
 //! - `flags.z`/`flags.w` carry `exposure`/`contrast` as f32 bit patterns
 //! - `pad.x` = ground opacity, `pad.yzw` = linear background color
 //!
+//! Background (Task 18b): a fullscreen gradient quad (`shaders/background.wgsl`)
+//! is drawn first in the scene pass - and alone when no scene is loaded - so
+//! the HDR always holds the calibrated radial gradient with the alpha-0
+//! background marker; post.wgsl's bypass branch re-encodes it and ground/blend
+//! pixels blend against the true gradient rather than a flat clear color.
+//!
 //! Task 7 adaptations over the plan (full list in task-7-report.md):
 //! - post.wgsl sRGB-encodes its output (runtime target is non-Srgb Bgra8Unorm)
-//!   and bypasses tonemapping for background pixels (HDR alpha < 0.5), which
-//!   requires `PostU.clear_color` (linear) — see uniforms.rs.
+//!   and bypasses tonemapping for background pixels (HDR alpha < 0.5); since
+//!   Task 18b the bypass re-encodes the HDR's gradient directly (no bg
+//!   uniform in PostU).
 //! - `prepare_render` gained `&Queue` per the Step 6 integration shape.
 //! - Screenshot readback swaps BGRA->RGBA (the `final` texture is Bgra8Unorm at
 //!   runtime); Task 13 consumes `collect_screenshot`.
@@ -37,20 +44,45 @@ use bytemuck::Zeroable;
 use egui_wgpu::wgpu;
 use egui_wgpu::wgpu::util::DeviceExt;
 use glam::{Mat3, Mat4, Vec3};
-use uniforms::{GlobalsU, LIGHT_COUNT, LightU, MaterialU, ModelU, PostU, ShadowVpU};
+use uniforms::{BgU, GlobalsU, LIGHT_COUNT, LightU, MaterialU, ModelU, PostU, ShadowVpU};
 
 /// Light intensity multiplier — the theme's normalized intensity (100 = 1.0)
 /// is multiplied by this before reaching the shader. Keep in sync with
-/// shaders/pbr.wgsl (`* 8.0` in `shade_light`). Adjust during smoke if the
-/// model reads brighter/dimmer than the original app.
-pub const LIGHT_SCALE: f32 = 8.0;
+/// shaders/pbr.wgsl (`* 1.5` in `shade_light`) and ground.wgsl. Calibrated in
+/// Task 18b against the original app's runtime ground-pool brightness
+/// (~119/255 encoded) via tests/calibration.rs; was 8.0 before calibration.
+pub const LIGHT_SCALE: f32 = 1.5;
 /// Environment (ambient) scale: contribution = albedo * env_color *
 /// env_intensity * ENV_SCALE. Keep in sync with shaders/pbr.wgsl (`* 0.35`
 /// in `fs_main`).
 pub const ENV_SCALE: f32 = 0.35;
-/// Theme background color rgb(69,74,80) in LINEAR space. The PBR pass clears
-/// the HDR buffer with it; post.wgsl sRGB-encodes it on output.
+/// The PBR pass clears the HDR buffer with it (alpha 0 marker); ground.wgsl
+/// also uses it as the blend reference for its rim fade. The VISIBLE
+/// background is the radial gradient below (Task 18b) - this flat color only
+/// feeds blend math.
 pub const DEFAULT_CLEAR_COLOR: [f32; 3] = [0.0592, 0.0677, 0.0797];
+
+/// Background gradient calibration (Task 18b, from Task 12's live A/B against
+/// the original app): neutral (R=G=B) radial gradient, encoded sRGB ~110/255
+/// at the viewport center fading to ~97/255 at the corners. Stored as ENCODED
+/// targets and converted to linear for the HDR-drawn gradient, so the post
+/// pass's re-encode round-trips to exactly these values.
+pub const BG_CENTER_ENCODED: f32 = 110.0 / 255.0;
+pub const BG_EDGE_ENCODED: f32 = 97.0 / 255.0;
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear-space background gradient values for `BgU`.
+pub fn bg_gradient_linear() -> ([f32; 3], [f32; 3]) {
+    let to_lin = |v: f32| [srgb_to_linear(v); 3];
+    (to_lin(BG_CENTER_ENCODED), to_lin(BG_EDGE_ENCODED))
+}
 
 /// One slot in the fixed 3-light rig.
 #[derive(Debug)]
@@ -140,16 +172,15 @@ struct ShadowMap {
     bg: wgpu::BindGroup,
 }
 
-/// 1x1 stand-ins for the empty-scene post pass and the bloom-off post bind
-/// group (Task 10: the bloom-on group binds the real half-res chain's
-/// `bloom_a`; the 1x1 dummies stay bound whenever bloom is off). The shadow
-/// maps are real since Task 9 (512² per light, bound directly by
-/// `globals_bg`).
+/// 1x1 stand-ins for the bloom-off post bind group (Task 10: the bloom-on
+/// group binds the real half-res chain's `bloom_a`; the 1x1 dummies stay bound
+/// whenever bloom is off - weight 0.0, never sampled). The empty-scene post
+/// pass was removed in Task 18b: the background quad now fills the HDR there
+/// too, so the real `post_bg` serves every case. The shadow maps are real
+/// since Task 9 (512 per light, bound directly by `globals_bg`).
 struct Dummies {
-    black_tex: wgpu::Texture,
-    black_view: wgpu::TextureView,
     /// (bloom_a, bloom_b) 1x1 dummies; bloom_a's stays in the post bind group
-    /// while bloom is off (never sampled there — weight 0.0).
+    /// while bloom is off (never sampled there - weight 0.0).
     bloom_chain: Vec<(wgpu::Texture, wgpu::TextureView)>,
 }
 
@@ -205,10 +236,15 @@ pub struct Renderer {
     ground_vb: wgpu::Buffer,
     ground_ib: wgpu::Buffer,
     ground_index_count: u32,
+    /// Background gradient quad (Task 18b): drawn first in the scene pass and
+    /// alone in the empty-scene pass, so the HDR always holds the gradient and
+    /// post.wgsl's background branch just re-encodes it.
+    bg_pipeline: wgpu::RenderPipeline,
+    bg_ub: wgpu::Buffer,
+    bg_bg: wgpu::BindGroup,
     post_bg: Option<wgpu::BindGroup>,
     /// Post bind group with the real `bloom_a` view (bloom ON).
     post_bg_bloom: Option<wgpu::BindGroup>,
-    post_bg_empty: wgpu::BindGroup,
     /// Bloom chain (Task 10): stateless pipeline + half-res targets/binds.
     bloom: post::Bloom,
     blit_bg: Option<wgpu::BindGroup>,
@@ -588,15 +624,8 @@ impl Renderer {
         // in resize().
         let bloom = post::Bloom::new(device);
 
-        // Dummy black 1x1 float textures for the empty-scene post pass /
-        // bloom slot.
-        let black_tex = dummy_texture(
-            device,
-            "dummy_black",
-            wgpu::TextureFormat::Rgba16Float,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        );
-        let black_view = black_tex.create_view(&Default::default());
+        // 1x1 float dummies for the bloom-off post bind group's bloom slot
+        // (never sampled there - weight 0.0).
         let mut bloom_chain = Vec::new();
         for i in 0..2 {
             let tex = dummy_texture(
@@ -610,11 +639,7 @@ impl Renderer {
             let view = tex.create_view(&Default::default());
             bloom_chain.push((tex, view));
         }
-        let dummies = Dummies {
-            black_tex,
-            black_view,
-            bloom_chain,
-        };
+        let dummies = Dummies { bloom_chain };
 
         // 1x1 material fallbacks (white base/mr identity, neutral normal, black
         // emissive). Pixels are written via the queue on first prepare.
@@ -793,27 +818,45 @@ impl Renderer {
                 }),
             }],
         });
-        let post_bg_empty = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("post_bg_empty"),
-            layout: &post_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&dummies.black_view),
+        // Background gradient quad (Task 18b): drawn first in the scene pass
+        // and alone when no scene is loaded, so the HDR always holds the
+        // calibrated gradient (post.wgsl's background branch re-encodes it).
+        let bg_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("background.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/background.wgsl").into()),
+        });
+        let bg_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bg_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<BgU>() as u64),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&dummies.bloom_chain[0].1),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&bloom_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: post_ub.as_entire_binding(),
-                },
-            ],
+                count: None,
+            }],
+        });
+        let bg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bg_layout"),
+            bind_group_layouts: &[Some(&bg_bgl)],
+            immediate_size: 0,
+        });
+        let bg_pipeline = build_background_pipeline(device, &bg_layout, &bg_shader);
+        let bg_ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bg_ub"),
+            size: size_of::<BgU>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bg_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg_bg"),
+            layout: &bg_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bg_ub.as_entire_binding(),
+            }],
         });
 
         Self {
@@ -827,6 +870,9 @@ impl Renderer {
             model_bgl,
             post_bgl,
             blit_bgl,
+            bg_pipeline,
+            bg_ub,
+            bg_bg,
             globals_ub,
             lights_ub,
             model_ub,
@@ -840,7 +886,6 @@ impl Renderer {
             ground_index_count,
             post_bg: None,
             post_bg_bloom: None,
-            post_bg_empty,
             blit_bg: None,
             lin_sampler,
             bloom_sampler,
@@ -1020,8 +1065,9 @@ impl Renderer {
         };
 
         // Post uniforms. Bloom weight = the original app's exact default when
-        // the chain runs, 0.0 otherwise (the off-path bind group's 1x1 dummy
-        // is never sampled at weight 0.0).
+        // the chain runs, 0.0 otherwise. The background gradient constants go
+        // to their own uniform below (Task 18b) - PostU no longer carries a
+        // clear color (post.wgsl re-encodes the HDR's background quad).
         let post = PostU {
             exposure: params.settings.exposure,
             contrast: params.settings.contrast,
@@ -1031,14 +1077,17 @@ impl Renderer {
                 0.0
             },
             pad: 0.0,
-            clear_color: [
-                params.settings.clear_color[0],
-                params.settings.clear_color[1],
-                params.settings.clear_color[2],
-                0.0,
-            ],
         };
         queue.write_buffer(&self.post_ub, 0, bytemuck::bytes_of(&post));
+        let (bg_center, bg_edge) = bg_gradient_linear();
+        queue.write_buffer(
+            &self.bg_ub,
+            0,
+            bytemuck::bytes_of(&BgU {
+                center: [bg_center[0], bg_center[1], bg_center[2], 0.0],
+                edge: [bg_edge[0], bg_edge[1], bg_edge[2], 0.0],
+            }),
+        );
 
         // Per-light shadow state (Task 9): fit an ortho projection around the
         // scene bounds for every light that casts. The SAME matrix goes into
@@ -1197,14 +1246,13 @@ impl Renderer {
                 .unwrap_or(order.len());
 
             enum DrawStep {
+                Background,
                 Mesh(usize),
                 Ground,
             }
             let ground_draw = params.settings.ground && params.settings.ground_opacity > 0.0;
-            let steps = order[..blend_start]
-                .iter()
-                .copied()
-                .map(DrawStep::Mesh)
+            let steps = std::iter::once(DrawStep::Background)
+                .chain(order[..blend_start].iter().copied().map(DrawStep::Mesh))
                 .chain(ground_draw.then_some(DrawStep::Ground))
                 .chain(order[blend_start..].iter().copied().map(DrawStep::Mesh));
 
@@ -1276,6 +1324,15 @@ impl Renderer {
             let mut current: Option<&wgpu::RenderPipeline> = None;
             for step in steps {
                 match step {
+                    DrawStep::Background => {
+                        // Task 18b: the gradient goes in FIRST (alpha 0
+                        // marker, no depth), so ground and blend pixels blend
+                        // against the true gradient and post.wgsl's background
+                        // branch re-encodes exactly what was rendered.
+                        pass.set_pipeline(&self.bg_pipeline);
+                        pass.set_bind_group(0, &self.bg_bg, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
                     DrawStep::Ground => {
                         pass.set_pipeline(&self.ground_pipeline);
                         pass.set_bind_group(0, &self.globals_bg, &[]);
@@ -1334,16 +1391,52 @@ impl Renderer {
         // Bloom chain (Task 10): threshold + separable blur at half res, run
         // after the MSAA resolve (the pbr pass above) and before the post
         // pass, only when bloom is enabled and a scene is present. The
-        // threshold reads the resolved HDR; background pixels (cleared to
-        // linear rgb with luminance ~0.07 << 1.0) never pass the threshold,
-        // so no halo forms over the background.
+        // threshold reads the resolved HDR; background pixels hold the
+        // gradient (luminance ~0.12-0.16 << 1.0) and never pass the
+        // threshold, so no halo forms over the background.
         if params.settings.bloom && self.gpu_scene.is_some() {
             self.bloom.record(encoder);
         }
 
-        // Post pass: HDR -> final (full-screen triangle). With no scene the
-        // black 1x1 source has alpha 0, so every pixel takes the background
-        // branch and `final` ends up holding the encoded clear color.
+        // No scene: still fill the HDR with the background gradient (alpha 0
+        // marker), so the post's background branch re-encodes the same
+        // calibrated look a loaded scene shows (Task 18b; replaces the old
+        // post_bg_empty 1x1-black path).
+        if self.gpu_scene.is_none() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("background_only_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &targets.hdr_msaa_view,
+                    resolve_target: Some(&targets.hdr_view),
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    // The background pipeline declares Depth24Plus (the scene
+                    // pass carries depth), so this pass must attach the same
+                    // target even though the quad ignores depth.
+                    view: &targets.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.bg_pipeline);
+            pass.set_bind_group(0, &self.bg_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Post pass: HDR -> final (full-screen triangle). Background pixels
+        // (alpha 0) re-encode the HDR's gradient; scene pixels take the
+        // tonemap chain.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("post_pass"),
@@ -1362,17 +1455,12 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.post_pipeline);
-            // Scene present + bloom on -> the real chain result; otherwise the
-            // 1x1 dummy (bloom off: weight 0.0, never sampled / empty scene:
-            // background branch discards everything anyway).
+            // Bloom on -> the real chain result; otherwise the HDR directly
+            // (the 1x1 bloom-slot dummy stays bound but is never sampled at
+            // weight 0.0).
             let bg = match (self.gpu_scene.as_ref(), params.settings.bloom) {
-                (Some(_), true) => self
-                    .post_bg_bloom
-                    .as_ref()
-                    .or(self.post_bg.as_ref())
-                    .or(Some(&self.post_bg_empty)),
-                (Some(_), false) => self.post_bg.as_ref().or(Some(&self.post_bg_empty)),
-                (None, _) => Some(&self.post_bg_empty),
+                (Some(_), true) => self.post_bg_bloom.as_ref().or(self.post_bg.as_ref()),
+                _ => self.post_bg.as_ref(),
             };
             if let Some(bg) = bg {
                 pass.set_bind_group(0, bg, &[]);
@@ -1499,10 +1587,9 @@ impl Renderer {
                 },
             );
         };
-        // float16 black dummies (empty-scene source + bloom chain)
+        // float16 black dummies (bloom chain; never sampled at weight 0.0)
         let zero16f = [0u8; 8]; // one rgba16float pixel
         for tex in [
-            &self.dummies.black_tex,
             &self.dummies.bloom_chain[0].0,
             &self.dummies.bloom_chain[1].0,
         ] {
@@ -1689,6 +1776,54 @@ fn build_fullscreen_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: target_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Background gradient quad (Task 18b): fullscreen triangle into the HDR
+/// (Rgba16Float, 4x MSAA to match the scene pass), no depth, no blend. It
+/// must be drawn FIRST so every later draw overdraws it, and it writes the
+/// alpha-0 background marker post.wgsl keys on.
+fn build_background_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("background_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        // The scene pass carries a Depth24Plus attachment, so the pipeline
+        // must declare it; write OFF + Always means the quad neither tests
+        // nor writes depth (drawn first, everything overdraws it).
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24Plus,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 4,
+            ..Default::default()
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
