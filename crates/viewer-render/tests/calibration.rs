@@ -301,10 +301,11 @@ fn wireframe_dense_surface_keeps_shading() {
     let (plain, _, _) = mean_center_gray(&device, &queue, scene.clone(), false);
     let (wire, mr, mb) = mean_center_gray(&device, &queue, scene, true);
     println!("dense mean: plain {plain:.1}, wireframe {wire:.1} (r {mr:.1} vs b {mb:.1})");
-    // The user-reported bug: dense + wireframe washed the WHOLE surface into
-    // the dark BLUE line color — the surface must keep both shading AND hue.
+    // The user-reported bug history: the wireframe first washed dense models
+    // uniformly blue, then (darkening fix) still cost ~50% of the shading.
+    // The density-aware fade keeps ~97% of the shading; lock that in.
     assert!(
-        wire >= 0.4 * plain,
+        wire >= 0.85 * plain,
         "dense wireframe washes out the surface: plain {plain:.1} vs \
          wireframe {wire:.1}"
     );

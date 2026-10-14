@@ -181,19 +181,20 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
   if (G.flags.x == 1u) { // wireframe overlay (barycentric edge factor)
     let d = min(f.bary.x, min(f.bary.y, f.bary.z));
     // Distance to the nearest triangle edge IN PIXELS (d changes ~1 unit per
-    // pixel across the triangle). Guard against zero derivative (degenerate
-    // barycentric interpolation).
-    let px = d / max(fwidth(d), 1e-6);
-    // ~1.6px anti-aliased band: pixel centers nearest an edge sit at
-    // px ~ 0.5-0.9 (MSAA quantization), so the band must extend past 1px or
-    // the lines come out too faint to see (measured on the sparse probe).
-    let line = 1.0 - smoothstep(0.6, 1.6, px);
-    // Darken the shaded surface toward near-black instead of mixing to a
-    // flat color: sparse meshes show crisp neutral lines over shading; dense
-    // meshes (sub-pixel triangles, line ~ 1 everywhere) read as a darkened
-    // wireframe surface that KEEPS its shading structure and hue. The old
-    // flat dark-blue mix turned dense models uniformly blue (user-reported).
-    col = mix(col, col * vec3<f32>(0.18), line * 0.85);
+    // pixel across the triangle), and the triangle's on-screen edge length.
+    // Guard against zero derivative (degenerate barycentric interpolation).
+    let fw = max(fwidth(d), 1e-6);
+    let px = d / fw;
+    let tri_px = 1.0 / fw;
+    // Density-aware fading (user feedback: on dense meshes the lines' contrast
+    // washed the polygons out). Full-strength lines while an edge is >= 3px
+    // long - i.e. exactly while individual polygons are resolvable - fading
+    // to a whisper below that, so zoomed-out dense models keep their shading
+    // and zooming in resolves the wireframe naturally.
+    let fade = clamp(tri_px / 3.0, 0.15, 1.0);
+    let line = (1.0 - smoothstep(0.6, 1.6, px)) * fade;
+    // Lines darken the shaded surface (neutral, keeps hue and lighting).
+    col = mix(col, col * vec3<f32>(0.4), line * 0.85);
   }
   // Task 7 adaptation: the resolved HDR buffer's alpha doubles as a background
   // marker for post.wgsl (dst alpha < 0.5 = background -> untonemapped clear
