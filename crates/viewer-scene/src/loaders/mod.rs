@@ -3,6 +3,7 @@ pub mod gltf_loader;
 pub mod obj_loader;
 pub mod ply_loader;
 pub mod stl_loader;
+pub mod three_mf;
 
 use crate::error::LoadError;
 use crate::scene::Scene;
@@ -17,11 +18,7 @@ pub fn load(path: &std::path::Path) -> Result<Scene, LoadError> {
         Some("obj") => obj_loader::load(path)?,
         Some("stl") => stl_loader::load(path)?,
         Some("ply") => ply_loader::load(path)?,
-        Some("3mf") => {
-            return Err(LoadError::UnsupportedFormat(
-                "3MF (arrives in Task 19)".into(),
-            ));
-        }
+        Some("3mf") => three_mf::load(path)?,
         Some("fbx") => return Err(LoadError::UnsupportedFormat("FBX".into())),
         other => {
             return Err(LoadError::Parse {

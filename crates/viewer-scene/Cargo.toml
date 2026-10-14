@@ -9,3 +9,5 @@ thiserror.workspace = true
 gltf.workspace = true
 tobj.workspace = true
 image.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
