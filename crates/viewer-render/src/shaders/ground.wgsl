@@ -32,12 +32,17 @@
 //    disc rim (HDR composite → bg ≈ 0.06 is far below the black-clamp
 //    threshold). The fragment lifts the effective opacity so the composite
 //    never drops below T_BG, the HDR value post.wgsl maps back to the
-//    displayed background color; the rim therefore displays exactly the
-//    background and the disc fades out seamlessly. T_BG is derived in-shader
+//    displayed background color; the rim therefore fades into the background
+//    and the disc fades out seamlessly. T_BG is derived in-shader
 //    from the exposure/contrast carried in flags.zw, so user settings stay
 //    honored. (Known limitation: where the disc's own shaded color is dimmer
 //    than T_BG — only reachable with non-default lighting/exposure — the
 //    composite cannot reach the threshold and those pixels render dark.)
+//    Task 18b note: the fade blend still uses the flat linear background from
+//    `pad.yzw`, while the visible HDR background is now the gradient drawn by
+//    the background quad — the fade terminus lands ~10-13 encoded levels below
+//    the adjacent gradient in the outermost band (≈0.9+ radial). Accepted as
+//    matching the original's dark rim; see task-18b-report.md.
 
 struct Globals {
   view_proj: mat4x4<f32>,
@@ -113,6 +118,14 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
   let radial = f.uv.x;
   let ground_alpha = G.pad.x * (1.0 - smoothstep(0.75, 1.0, radial));
   let bg = G.pad.yzw;
+  // Tonemap-survival reference (Task 18b): the per-channel HDR value that
+  // post.wgsl's chain maps back to the flat background color. The fade band's
+  // composite must never sink below it (ACES + contrast crushes below this to
+  // black), and the gradient dst is brighter than it on every channel, so
+  // flooring rgb_out (below) guarantees a surviving composite for every va.
+  // This replaces Task 8's opacity lift, whose col > bg assumption broke once
+  // the 18b falloff darkened the rim below the background.
+  let t_bg = tonemap_bg_threshold(bg, bitcast<f32>(G.flags.z), bitcast<f32>(G.flags.w));
   var col = vec3<f32>(0.55, 0.55, 0.55) * G.env_color.rgb * G.env_color.w * 0.35;
   // simple lambert per light with shadows
   let N = vec3<f32>(0.0, 1.0, 0.0);
@@ -134,12 +147,12 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
         else { vis = pcf_g(shadow2, uv, sp.z, texel); }
       }
     }
-    col += vec3<f32>(0.55) * L[i].color.rgb * L[i].pos.w * 1.5 / (dist * dist + 1.0) * n_dot_l * vis / 3.14159265;
+    col += vec3<f32>(0.55) * L[i].color.rgb * L[i].pos.w * 1.85 / (dist * dist + 1.0) * n_dot_l * vis / 3.14159265;
   }
   // Task 18b: radial pool falloff calibrated to the original app's ground
-  // (encoded pool ~119/255 at the center darkening to ~37/255 at the disc
-  // edge, ratio ~0.31). Applied before the grid so grid lines sit on the
-  // darkened ground.
+  // (encoded pool ~119/255 at the center darkening toward the disc edge,
+  // ratio ~0.31). Applied before the grid so grid lines sit on the darkened
+  // ground.
   col *= mix(1.0, 0.31, smoothstep(0.05, 0.9, radial));
   if (G.flags.y == 1u) { // grid overlay
     let g = abs(fract(f.world.xz * 2.0 - 0.5) - 0.5) / max(fwidth(f.world.xz * 2.0), vec2<f32>(1e-5));
@@ -147,15 +160,21 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
     col = mix(col, vec3<f32>(0.3, 0.32, 0.36), line * 0.6);
   }
 
-  // Lift the effective opacity where the falloff would sink the composite
-  // below the tonemap-survivable threshold (per channel, worst case wins).
-  let t_bg = tonemap_bg_threshold(bg, bitcast<f32>(G.flags.z), bitcast<f32>(G.flags.w));
-  let t_min = clamp((t_bg - bg) / max(col - bg, vec3<f32>(1e-4)), vec3<f32>(0.0), vec3<f32>(1.0));
-  let va = max(ground_alpha, max(t_min.r, max(t_min.g, t_min.b)));
-  // Task 7 marker mechanism: floor the output alpha at 0.5 (post.wgsl
-  // discards fragments under it) and pre-compensate rgb for the SrcAlpha
-  // blend factor the marker forces.
+  // Task 7/8 marker mechanism: floor the output alpha at 0.5 (post.wgsl
+  // classifies dst alpha < 0.5 as background) and pre-compensate rgb for the
+  // SrcAlpha blend factor the marker forces. With the plain visual alpha
+  // (Task 8's lift removed - the gradient dst inverted its col > bg
+  // assumption), the pre-compensation's blend toward `bg` could sink the
+  // composite below the crush threshold in the fade band, so rgb_out is
+  // floored at t_bg: composite = a_out*rgb_out + (1-a_out)*dst >=
+  // a_out*t_bg + (1-a_out)*dst >= t_bg for every va (dst >= t_bg on all
+  // channels - the gradient is brighter than the flat background).
+  let va = ground_alpha;
   let a_out = max(va, 0.5);
-  let rgb_out = (va * col + (a_out - va) * bg) / a_out;
+  // Floor at the LARGEST per-channel t_bg: the flat background (and hence
+  // t_bg) is blue-tinted, and a per-channel floor would leave a visible blue
+  // drift in the fade band. A gray floor at the most conservative level
+  // keeps the composite >= t_bg on every channel.
+  let rgb_out = max((va * col + (a_out - va) * bg) / a_out, vec3<f32>(t_bg.b));
   return vec4<f32>(rgb_out, a_out);
 }

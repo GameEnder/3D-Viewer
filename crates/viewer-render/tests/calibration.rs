@@ -132,15 +132,18 @@ fn calibration_measurements() {
         .expect("screenshot readback");
     let rgba = img.into_raw();
 
-    // Background corner (top-left) and near-center (top-middle, above the
-    // disc's horizon on screen).
+    // Background corner (top-left) and top-edge center (geometry-derived
+    // expectations below), plus a center-sensitive sample just above the
+    // disc's horizon (the true gradient center is behind the disc on screen).
     let corner = sample(&rgba, w, 4, 4);
     let top_center = sample(&rgba, w, w / 2, 4);
+    let above_horizon = sample(&rgba, w, w / 2, 118);
     // Ground pool: offset from the screen center (where the model sits) but
     // still well inside the disc.
     let pool = sample(&rgba, w, w / 2 + 60, h / 2 + 24);
-    // Ground rim: near the disc's screen edge along +x.
-    let rim = sample(&rgba, w, w - 12, h / 2);
+    // Ground deep rim: ON-disc (the disc edge projects to x~385 at this
+    // framing), inside the falloff/fade band.
+    let rim = sample(&rgba, w, 375, h / 2);
 
     println!(
         "bg corner     rgb({}, {}, {})",
@@ -149,6 +152,10 @@ fn calibration_measurements() {
     println!(
         "bg top-center rgb({}, {}, {})",
         top_center[0], top_center[1], top_center[2]
+    );
+    println!(
+        "bg above-horizon rgb({}, {}, {})",
+        above_horizon[0], above_horizon[1], above_horizon[2]
     );
     println!("ground pool   rgb({}, {}, {})", pool[0], pool[1], pool[2]);
     println!("ground rim    rgb({}, {}, {})", rim[0], rim[1], rim[2]);
@@ -167,6 +174,13 @@ fn calibration_measurements() {
         "bg top-center {} vs target ~101 (geometry-derived: uv distance \
          ~0.688 from the gradient center at this sample point)",
         gray(top_center)
+    );
+    // Center-sensitive sample (t ~ 0.15 from the gradient center): pins the
+    // center constant far more tightly than the top-edge sample.
+    assert!(
+        (gray(above_horizon) - 108).abs() <= 3,
+        "bg above-horizon {} vs target ~108",
+        gray(above_horizon)
     );
     // Ground pool: LIGHT_SCALE calibrated so the pool reads ~119/255 encoded
     // (the original app's measured pool brightness).

@@ -48,10 +48,10 @@ use uniforms::{BgU, GlobalsU, LIGHT_COUNT, LightU, MaterialU, ModelU, PostU, Sha
 
 /// Light intensity multiplier — the theme's normalized intensity (100 = 1.0)
 /// is multiplied by this before reaching the shader. Keep in sync with
-/// shaders/pbr.wgsl (`* 1.5` in `shade_light`) and ground.wgsl. Calibrated in
+/// shaders/pbr.wgsl (* 1.85 in shade_light) and ground.wgsl. Calibrated in
 /// Task 18b against the original app's runtime ground-pool brightness
-/// (~119/255 encoded) via tests/calibration.rs; was 8.0 before calibration.
-pub const LIGHT_SCALE: f32 = 1.5;
+/// (~119/255 encoded) via tests/calibration.rs; was 8.0 pre-calibration; retuned 1.5 -> 1.85 after the Task 8 lift was replaced by the rgb_out floor.
+pub const LIGHT_SCALE: f32 = 1.85;
 /// Environment (ambient) scale: contribution = albedo * env_color *
 /// env_intensity * ENV_SCALE. Keep in sync with shaders/pbr.wgsl (`* 0.35`
 /// in `fs_main`).
