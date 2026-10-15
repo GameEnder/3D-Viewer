@@ -127,6 +127,8 @@ pub struct ViewerApp {
     /// a screenshot save failure. Shown at the viewport's bottom-left until
     /// expired (a failed PNG save is shown for ~4 s).
     note: Option<(String, std::time::Instant)>,
+    /// Whether the About dialog (Help menu) is open.
+    about_open: bool,
 }
 
 /// How long a transient status note stays visible (Task 18).
@@ -227,6 +229,7 @@ impl ViewerApp {
             contrast: 1.66,
             anim: panels::AnimationState::default(),
             note: None,
+            about_open: false,
         }
     }
 
@@ -270,6 +273,27 @@ impl ViewerApp {
             ];
         }
         (lights, env_color, env_intensity)
+    }
+
+    /// Reset every user-editable render/lighting/camera setting to the
+    /// original app's defaults (Edit → Reset All Settings).
+    fn reset_all_settings(&mut self) {
+        self.theme_idx = 0;
+        self.light_mult = [1.0; 3];
+        self.env_mult = 1.0;
+        self.shadows_enabled = true;
+        self.wireframe = false;
+        self.ground = true;
+        self.grid = true;
+        self.bloom = true;
+        self.exposure = 0.5;
+        self.contrast = 1.66;
+        self.rig_rot_deg = 0.0;
+        self.light_color_override = [None; 3];
+        self.env_color_override = None;
+        self.camera.fov_y_deg = crate::camera::DEFAULT_FOV_DEG;
+        self.rot_offset_deg = 0.0;
+        self.model_scale = 1.0;
     }
 
     fn frame_params(&self, aspect: f32) -> FrameParams {
@@ -575,11 +599,25 @@ impl eframe::App for ViewerApp {
         // Animation playback (Task 17): advance + keep repainting while on.
         self.advance_animation(ui.ctx());
 
-        // Top strip (UI redesign): Open / Screenshot — the original exposes
-        // file actions through its menu row. Both panels run before the
-        // CentralPanel so the viewport shrinks this same frame.
-        let top = panels::top_strip(ui);
-        let mut reset_view = false;
+        // Top menu bar (original-style: File / Edit / Tools / View / Help).
+        let menu = panels::menu_bar(ui);
+        let mut reset_view = menu.reset_view;
+        // Viewpoint preset from the View menu (same as the View tab buttons).
+        if let Some((el, ro)) = menu.viewpoint {
+            self.camera.elevation_deg = el;
+            self.camera.rotation_deg = ro;
+        }
+        // Reset all settings (Edit menu).
+        if menu.reset_settings {
+            self.reset_all_settings();
+        }
+        // About dialog (Help menu).
+        self.about_open = menu.about;
+        panels::about_dialog(ui.ctx(), &mut self.about_open);
+        // Exit (File menu).
+        if menu.exit {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         {
             let (source_name, stats) = match &self.state {
                 AppState::Ready(scene) => (Some(scene.source_name.as_str()), model_stats(scene)),
@@ -688,10 +726,10 @@ impl eframe::App for ViewerApp {
         // flag with a brief lock (the frame's staging copy is created by the
         // paint callback's prepare phase and collected at the top of the
         // next ui() call). Without a renderer neither can run.
-        if let Some(path) = top.open {
+        if let Some(path) = menu.open {
             self.open_path(ui.ctx(), path);
         }
-        if top.screenshot {
+        if menu.screenshot {
             renderer
                 .lock()
                 .expect("renderer mutex")
@@ -860,6 +898,7 @@ mod tests {
             contrast: 1.66,
             anim: panels::AnimationState::default(),
             note: None,
+            about_open: false,
         }
     }
 

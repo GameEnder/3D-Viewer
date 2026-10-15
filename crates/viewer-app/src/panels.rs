@@ -87,45 +87,109 @@ pub fn status_note(ui: &mut egui::Ui, viewport: egui::Rect, text: &str, above_li
     );
 }
 
-/// Side effects the top strip collected for the app to apply. The Open
-/// dialog runs inside the panel (native, blocking while open), and the
-/// Screenshot click only raises a flag: the app flips the renderer's pending
-/// screenshot flag after the panel returns (Task 13 collects the PNG), so no
-/// button can panic without a scene or renderer.
+/// Side effects the menu bar collected for the app to apply.
 #[derive(Default)]
-pub struct TopStripOutcome {
+pub struct MenuBarOutcome {
     pub open: Option<std::path::PathBuf>,
     pub screenshot: bool,
+    pub exit: bool,
+    /// Reset ALL render/lighting/camera settings to their defaults.
+    pub reset_settings: bool,
+    /// Viewpoint preset (elevation, rotation) from the View menu.
+    pub viewpoint: Option<(f32, f32)>,
+    /// Reset camera framing (fit to model).
+    pub reset_view: bool,
+    /// Show the About dialog.
+    pub about: bool,
 }
 
-/// The slim dark top strip (the original exposes file actions through its
-/// menu row; this is our equivalent): Open and Screenshot as compact
-/// icon+label buttons. The turntable lives in the bottom bar.
-pub fn top_strip(ui: &mut egui::Ui) -> TopStripOutcome {
-    let mut out = TopStripOutcome::default();
-    egui::Panel::top("top_strip")
+/// The traditional top menu bar (original-style: File / Edit / Tools /
+/// View / Help), shown in a top panel. Actions are collected into
+/// `MenuBarOutcome` for the app to apply after the bar returns.
+pub fn menu_bar(ui: &mut egui::Ui) -> MenuBarOutcome {
+    let mut out = MenuBarOutcome::default();
+    egui::Panel::top("menu_bar")
         .resizable(false)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button("📂 Open")
-                    .on_hover_text("Open a model (GLB, GLTF, OBJ, STL, PLY, 3MF)")
-                    .clicked()
-                {
-                    out.open = rfd::FileDialog::new()
-                        .add_filter("3D models", &["glb", "gltf", "obj", "stl", "ply", "3mf"])
-                        .pick_file();
-                }
-                if ui
-                    .button("📷 Screenshot")
-                    .on_hover_text("Save a screenshot of the 3D view")
-                    .clicked()
-                {
-                    out.screenshot = true;
-                }
+            egui::MenuBar::new().ui(ui, |ui| {
+                // ── File ──
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open…").clicked() {
+                        out.open = rfd::FileDialog::new()
+                            .add_filter("3D models", &["glb", "gltf", "obj", "stl", "ply", "3mf"])
+                            .pick_file();
+                        ui.close();
+                    }
+                    if ui.button("Save Screenshot…").clicked() {
+                        out.screenshot = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Exit").clicked() {
+                        out.exit = true;
+                        ui.close();
+                    }
+                });
+                // ── Edit ──
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Reset All Settings").clicked() {
+                        out.reset_settings = true;
+                        ui.close();
+                    }
+                });
+                // ── Tools ──
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Take Screenshot…").clicked() {
+                        out.screenshot = true;
+                        ui.close();
+                    }
+                });
+                // ── View ──
+                ui.menu_button("View", |ui| {
+                    if ui.button("Reset View").clicked() {
+                        out.reset_view = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    for &(el, ro, label) in VIEWPOINTS.iter() {
+                        if ui.button(label).clicked() {
+                            out.viewpoint = Some((el, ro));
+                            ui.close();
+                        }
+                    }
+                });
+                // ── Help ──
+                ui.menu_button("Help", |ui| {
+                    if ui.button("About 3D Viewer").clicked() {
+                        out.about = true;
+                        ui.close();
+                    }
+                });
             });
         });
     out
+}
+
+/// Modal About dialog (original has a deprecation notice; ours shows the
+/// clone's info). Dismissed with OK.
+pub fn about_dialog(ctx: &egui::Context, open: &mut bool) {
+    if !*open {
+        return;
+    }
+    egui::Window::new("About 3D Viewer")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.heading("3D Viewer");
+            ui.label("A Rust clone of Microsoft's 3D Viewer");
+            ui.add_space(4.0);
+            ui.label("Supports: GLB, GLTF, OBJ, STL, PLY, 3MF");
+            ui.add_space(8.0);
+            if ui.button("OK").clicked() {
+                *open = false;
+            }
+        });
 }
 
 /// App-side animation playback state (Task 17). The bar writes it; the app
