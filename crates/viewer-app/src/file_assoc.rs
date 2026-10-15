@@ -63,6 +63,38 @@ pub mod imp {
     /// Register all extensions to open with our ProgID.
     /// Returns the number of extensions successfully registered.
     pub fn register() -> Result<usize, String> {
+        clear_userchoice_overrides();
+        let count = write_all_extensions()?;
+        notify_explorer();
+        Ok(count)
+    }
+
+    /// Remove all registrations (ProggID + extension references).
+    /// Returns the number of extensions successfully unregistered.
+    pub fn unregister() -> Result<usize, String> {
+        let count = clear_all_extensions()?;
+        notify_explorer();
+        Ok(count)
+    }
+
+    /// Delete the UserChoice override for each extension. Windows writes
+    /// UserChoice when the user picks a default app in Settings; it takes
+    /// priority over `Classes\.ext\Default`, so we must clear it to become
+    /// the default handler.
+    fn clear_userchoice_overrides() {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts";
+        for ext in EXTENSIONS {
+            let uc_path = format!("{base}\\.{ext}\\UserChoice");
+            if let Ok(key) = hkcu.open_subkey_with_flags(&uc_path, KEY_SET_VALUE) {
+                let _ = key.delete_value("ProgId");
+                let _ = key.delete_value("Hash");
+            }
+        }
+    }
+
+    /// Write the Classes entries for all extensions (Default + OpenWithProgids).
+    fn write_all_extensions() -> Result<usize, String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let classes = hkcu
             .open_subkey_with_flags("Software\\Classes", KEY_SET_VALUE | KEY_CREATE_SUB_KEY)
@@ -72,20 +104,29 @@ pub mod imp {
 
         let mut count = 0;
         for ext in EXTENSIONS {
-            let key_path = format!(".{ext}\\OpenWithProgids");
+            // Set the extension's Default to our ProgID — this is what
+            // makes Windows treat us as the DEFAULT handler.
+            let (ext_key, _) = classes
+                .create_subkey(format!(".{ext}"))
+                .map_err(|e| format!("create .{ext} key: {e}"))?;
+            ext_key
+                .set_value("", &PROG_ID)
+                .map_err(|e| format!("set .{ext} default: {e}"))?;
+
+            // Also register in OpenWithProgids (adds us to the context-menu
+            // "Open with" list, independent of the default assignment).
             let (key, _) = classes
-                .create_subkey(&key_path)
-                .map_err(|e| format!("create .{ext}: {e}"))?;
+                .create_subkey(format!(".{ext}\\OpenWithProgids"))
+                .map_err(|e| format!("create .{ext}\\OpenWithProgids: {e}"))?;
             key.set_value(PROG_ID, &"")
-                .map_err(|e| format!("set .{ext}: {e}"))?;
+                .map_err(|e| format!("set .{ext}\\OpenWithProgids: {e}"))?;
             count += 1;
         }
         Ok(count)
     }
 
-    /// Remove all registrations (ProgID + extension references).
-    /// Returns the number of extensions successfully unregistered.
-    pub fn unregister() -> Result<usize, String> {
+    /// Clear all extension entries (Default + OpenWithProgids) and the ProgID.
+    fn clear_all_extensions() -> Result<usize, String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let classes = hkcu
             .open_subkey_with_flags("Software\\Classes", KEY_SET_VALUE | KEY_CREATE_SUB_KEY)
@@ -93,6 +134,13 @@ pub mod imp {
 
         let mut count = 0;
         for ext in EXTENSIONS {
+            // Clear the extension's Default (removes us as default handler).
+            if let Ok(key) = classes.open_subkey_with_flags(format!(".{ext}"), KEY_SET_VALUE)
+                && key.get_value::<String, _>("").is_ok_and(|v| v == PROG_ID)
+            {
+                let _ = key.delete_value("");
+            }
+            // Remove the OpenWithProgids entry.
             let key_path = format!(".{ext}\\OpenWithProgids");
             if let Ok(key) = classes.open_subkey_with_flags(&key_path, KEY_SET_VALUE) {
                 let _ = key.delete_value(PROG_ID);
@@ -101,6 +149,23 @@ pub mod imp {
         }
         delete_progid(&classes)?;
         Ok(count)
+    }
+
+    /// Tell Explorer that file associations have changed (SHCNE_ASSOCCHANGED).
+    /// Without this, Explorer keeps using the cached association until it is
+    /// restarted or the user refreshes the desktop.
+    fn notify_explorer() {
+        // SHChangeNotify via rundll32 — avoids unsafe FFI in our codebase.
+        // SHCNE_ASSOCCHANGED = 0x08000000, SHCNF_FLUSH = 0x1000.
+        let _ = std::process::Command::new("rundll32")
+            .args([
+                "shell32.dll,SHChangeNotify",
+                "134217728", // 0x08000000 = SHCNE_ASSOCCHANGED
+                "4096",      // 0x00001000 = SHCNF_FLUSH
+                "0",
+                "0",
+            ])
+            .spawn();
     }
 
     /// Check whether our ProgID is currently registered.
