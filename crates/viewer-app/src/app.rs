@@ -75,6 +75,13 @@ pub struct ViewerApp {
     /// Requested camera viewpoint (elevation, rotation) from the View tab's
     /// preset buttons — applied after the panel returns, then cleared.
     viewpoint_request: Option<(f32, f32)>,
+    /// Viewpoint preset thumbnails (one per preset, model-dependent —
+    /// re-rendered on scene load). Empty until a model is loaded.
+    view_thumbs: Vec<image::RgbaImage>,
+    /// Lazily-created egui textures for the viewpoint thumbnails.
+    view_thumb_textures: Vec<egui::TextureHandle>,
+    /// True after a scene load: the viewpoint thumbnails need re-rendering.
+    view_thumbs_stale: bool,
     /// GPU-rendered theme thumbnails (one per theme, original-style swatch
     /// grid). Rendered once at startup; empty when no GPU is available (the
     /// panel then falls back to colored name swatches).
@@ -167,6 +174,9 @@ impl ViewerApp {
             light_color_override: [None; 3],
             env_color_override: None,
             viewpoint_request: None,
+            view_thumbs: Vec::new(),
+            view_thumb_textures: Vec::new(),
+            view_thumbs_stale: false,
             theme_thumbs,
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],
@@ -404,6 +414,7 @@ impl ViewerApp {
                                 );
                             }
                         }
+                        self.view_thumbs_stale = true;
                         self.state = AppState::Ready(arc);
                     }
                     Err(e) => self.state = AppState::Failed(failed_message(&e)),
@@ -444,6 +455,34 @@ impl eframe::App for ViewerApp {
         // Loading -> Ready/Failed transition; locks the shared renderer Arc,
         // so it must run before the frame's own lock below.
         self.poll_loading(ui.ctx());
+
+        // Viewpoint thumbnails (View tab): re-render after a scene load so
+        // the preset buttons show the actual model from each angle, like the
+        // original's preset thumbnails. Uses the current theme's lighting.
+        if self.view_thumbs_stale {
+            if let (AppState::Ready(scene), Some(rs)) = (&self.state, &self.render_state) {
+                let viewpoints: Vec<(f32, f32)> = crate::panels::VIEWPOINT_ANGLES.to_vec();
+                let (lights, (env, env_i)) = crate::themes::frame_lights(
+                    &THEMES[self.theme_idx],
+                    self.light_mult,
+                    self.env_mult,
+                );
+                self.view_thumbs = viewer_render::preview::render_viewpoint_thumbnails(
+                    &rs.device,
+                    &rs.queue,
+                    80,
+                    scene.clone(),
+                    &viewpoints,
+                    scene.bounds.center(),
+                    scene.bounds.bounding_sphere_radius(),
+                    lights,
+                    env,
+                    env_i,
+                );
+                self.view_thumb_textures.clear(); // force texture recreation
+            }
+            self.view_thumbs_stale = false;
+        }
 
         // Modal error dialog (Task 18): re-shown every frame while Failed;
         // OK returns to Idle. The message is cloned out so the ack write
@@ -537,6 +576,26 @@ impl eframe::App for ViewerApp {
                     .collect();
             }
             let thumbs = &self.thumb_textures;
+            // Lazily create egui textures for the viewpoint thumbnails.
+            let vctx = ui.ctx();
+            if self.view_thumb_textures.is_empty() && !self.view_thumbs.is_empty() {
+                self.view_thumb_textures = self
+                    .view_thumbs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, img)| {
+                        vctx.load_texture(
+                            format!("view_thumb_{i}"),
+                            egui::ColorImage::from_rgba_unmultiplied(
+                                [img.width() as usize, img.height() as usize],
+                                img.as_raw(),
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        )
+                    })
+                    .collect();
+            }
+            let vthumbs = &self.view_thumb_textures;
             panels::right_panel(
                 ui,
                 panels::PanelState {
@@ -562,6 +621,11 @@ impl eframe::App for ViewerApp {
                     light_color_override: &mut self.light_color_override,
                     env_color_override: &mut self.env_color_override,
                     viewpoint_request: &mut self.viewpoint_request,
+                    view_thumbs: if vthumbs.is_empty() {
+                        None
+                    } else {
+                        Some(vthumbs)
+                    },
                 },
                 if thumbs.is_empty() {
                     panels::ThemeThumbs::None
@@ -748,6 +812,9 @@ mod tests {
             light_color_override: [None; 3],
             env_color_override: None,
             viewpoint_request: None,
+            view_thumbs: Vec::new(),
+            view_thumb_textures: Vec::new(),
+            view_thumbs_stale: false,
             theme_thumbs: Vec::new(),
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],

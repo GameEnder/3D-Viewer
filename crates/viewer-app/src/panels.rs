@@ -181,6 +181,9 @@ pub struct PanelState<'a> {
     /// Requested camera viewpoint (elevation_deg, rotation_deg) — set by the
     /// preset buttons in the View tab, applied by the app after the panel.
     pub viewpoint_request: &'a mut Option<(f32, f32)>,
+    /// Viewpoint preset thumbnails (one per preset, model-dependent).
+    /// None = no model loaded yet → text-button fallback.
+    pub view_thumbs: Option<&'a [egui::TextureHandle]>,
 }
 
 /// Theme thumbnails for the Lighting tab's 3×3 grid. `Textures` holds the
@@ -395,7 +398,7 @@ fn model_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
 /// The View tab: camera + shading controls and the viewport toggles.
 /// Camera viewpoint presets matching the original app's Viewpoints section
 /// (elevation_deg, rotation_deg, label).
-const VIEWPOINTS: [(f32, f32, &str); 8] = [
+pub const VIEWPOINTS: [(f32, f32, &str); 8] = [
     (0.0, 0.0, "Front"),
     (0.0, 180.0, "Back"),
     (0.0, -90.0, "Left"),
@@ -406,22 +409,47 @@ const VIEWPOINTS: [(f32, f32, &str); 8] = [
     (35.264, -135.0, "Iso 2"),
 ];
 
+/// Angle-only view of VIEWPOINTS (for the thumbnail renderer in app.rs).
+pub const VIEWPOINT_ANGLES: [(f32, f32); 8] = [
+    (VIEWPOINTS[0].0, VIEWPOINTS[0].1),
+    (VIEWPOINTS[1].0, VIEWPOINTS[1].1),
+    (VIEWPOINTS[2].0, VIEWPOINTS[2].1),
+    (VIEWPOINTS[3].0, VIEWPOINTS[3].1),
+    (VIEWPOINTS[4].0, VIEWPOINTS[4].1),
+    (VIEWPOINTS[5].0, VIEWPOINTS[5].1),
+    (VIEWPOINTS[6].0, VIEWPOINTS[6].1),
+    (VIEWPOINTS[7].0, VIEWPOINTS[7].1),
+];
+
 fn view_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
     section_header(ui, "Viewpoints");
-    // 4×2 grid of preset camera angle buttons (original-style).
+    let thumbs = s.view_thumbs;
+    // 4×2 grid of preset camera angle buttons (original-style rendered
+    // thumbnails when a model is loaded, text buttons otherwise).
+    let cell = 66.0f32;
     egui::Grid::new("viewpoints")
         .num_columns(4)
         .spacing([4.0, 4.0])
         .show(ui, |ui| {
-            for chunk in VIEWPOINTS.chunks(4) {
-                for &(el, ro, label) in chunk {
-                    if ui
-                        .add_sized(
-                            [64.0, 28.0],
-                            egui::Button::new(egui::RichText::new(label).small()),
-                        )
-                        .clicked()
-                    {
+            for (row, chunk) in VIEWPOINTS.chunks(4).enumerate() {
+                for (col, &(el, ro, label)) in chunk.iter().enumerate() {
+                    let idx = row * 4 + col;
+                    let clicked = match thumbs.and_then(|t| t.get(idx)) {
+                        Some(tex) => ui
+                            .add(egui::Button::image(egui::Image::new((
+                                tex.id(),
+                                egui::vec2(cell, cell),
+                            ))))
+                            .on_hover_text(label)
+                            .clicked(),
+                        None => ui
+                            .add_sized(
+                                [cell, 28.0],
+                                egui::Button::new(egui::RichText::new(label).small()),
+                            )
+                            .clicked(),
+                    };
+                    if clicked {
                         *s.viewpoint_request = Some((el, ro));
                     }
                 }
@@ -775,6 +803,7 @@ mod tests {
                     light_color_override: &mut light_override,
                     env_color_override: &mut env_override,
                     viewpoint_request: &mut viewpoint_req,
+                    view_thumbs: None,
                     active_tab: &mut active_tab,
                 },
                 ThemeThumbs::None,
@@ -885,6 +914,7 @@ mod tests {
                     light_color_override: &mut light_override,
                     env_color_override: &mut env_override,
                     viewpoint_request: &mut viewpoint_req,
+                    view_thumbs: None,
                     active_tab: &mut active_tab,
                 },
                 ThemeThumbs::None,

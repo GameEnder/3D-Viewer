@@ -86,7 +86,7 @@ pub fn bg_gradient_linear() -> ([f32; 3], [f32; 3]) {
 }
 
 /// One slot in the fixed 3-light rig.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LightInput {
     pub pos: [f32; 3],
     pub color: [f32; 3],

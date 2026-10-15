@@ -164,3 +164,91 @@ pub fn camera_pos() -> [f32; 3] {
     let dir = glam::Vec3::new(el.cos() * ro.sin(), el.sin(), el.cos() * ro.cos());
     (target + dir * 2.9).to_array()
 }
+
+/// Compute view-projection matrix + camera position for a spherical-orbit
+/// camera at the given (elevation_deg, rotation_deg, distance), looking at
+/// `target` (the model bounds center).
+pub fn camera_at(
+    el_deg: f32,
+    ro_deg: f32,
+    distance: f32,
+    target: glam::Vec3,
+) -> ([[f32; 4]; 4], [f32; 3]) {
+    use glam::{Mat4, Vec3};
+    let el = el_deg.to_radians();
+    let ro = ro_deg.to_radians();
+    let dir = Vec3::new(el.cos() * ro.sin(), el.sin(), el.cos() * ro.cos());
+    let eye = target + dir * distance;
+    let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+    let proj = Mat4::perspective_rh(35.0f32.to_radians(), 1.0, 0.05, 100.0);
+    ((proj * view).to_cols_array_2d(), eye.to_array())
+}
+
+/// Parameters for [`render_viewpoint_thumbnails`] — grouped to stay under
+/// clippy's argument-count limit.
+pub struct ViewpointThumbParams {
+    pub lights: [super::LightInput; 3],
+    pub env_color: [f32; 3],
+    pub env_intensity: f32,
+}
+
+/// Batch-render viewpoint thumbnails of a loaded model: one small offscreen
+/// render per (elevation, rotation) pair, using the current theme's lighting.
+/// A single Renderer instance serves all renders (one pipeline setup, one
+/// scene upload). The caller passes the scene's bounds center + radius so the
+/// camera frames the model at a good distance.
+#[allow(clippy::too_many_arguments)]
+pub fn render_viewpoint_thumbnails(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: u32,
+    scene: Arc<Scene>,
+    viewpoints: &[(f32, f32)],
+    center: glam::Vec3,
+    radius: f32,
+    lights: [super::LightInput; 3],
+    env_color: [f32; 3],
+    env_intensity: f32,
+) -> Vec<image::RgbaImage> {
+    let mut renderer = super::Renderer::new(device, wgpu::TextureFormat::Bgra8Unorm);
+    renderer.resize(device, size, size);
+    renderer.set_scene(device, queue, scene);
+
+    let distance = (radius * 3.2).max(0.5);
+
+    let mut thumbs = Vec::with_capacity(viewpoints.len());
+    for &(el, ro) in viewpoints {
+        let (vp, cam) = camera_at(el, ro, distance, center);
+        renderer.queue_frame(super::FrameParams {
+            view_proj: vp,
+            camera_pos: cam,
+            turntable_deg: 0.0,
+            model_scale: 1.0,
+            lights: lights.clone(),
+            env_color,
+            env_intensity,
+            anim: None,
+            settings: super::RenderSettings {
+                clear_color: [0.03, 0.03, 0.035],
+                wireframe: false,
+                ground: false,
+                grid: false,
+                bloom: false,
+                exposure: 0.5,
+                contrast: 1.66,
+                ground_opacity: 0.4,
+                shadows: true,
+            },
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.request_screenshot();
+        renderer.prepare_render(device, queue, &mut encoder);
+        queue.submit(Some(encoder.finish()));
+        thumbs.push(
+            renderer
+                .collect_screenshot(device)
+                .expect("viewpoint thumbnail readback"),
+        );
+    }
+    thumbs
+}
