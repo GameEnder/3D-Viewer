@@ -72,6 +72,9 @@ pub struct ViewerApp {
     light_color_override: [Option<egui::Color32>; 3],
     /// Environment (ambient) color override (None = theme's).
     env_color_override: Option<egui::Color32>,
+    /// Requested camera viewpoint (elevation, rotation) from the View tab's
+    /// preset buttons — applied after the panel returns, then cleared.
+    viewpoint_request: Option<(f32, f32)>,
     /// GPU-rendered theme thumbnails (one per theme, original-style swatch
     /// grid). Rendered once at startup; empty when no GPU is available (the
     /// panel then falls back to colored name swatches).
@@ -163,6 +166,7 @@ impl ViewerApp {
             rig_rot_deg: 0.0,
             light_color_override: [None; 3],
             env_color_override: None,
+            viewpoint_request: None,
             theme_thumbs,
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],
@@ -557,6 +561,7 @@ impl eframe::App for ViewerApp {
                     rig_rot_deg: &mut self.rig_rot_deg,
                     light_color_override: &mut self.light_color_override,
                     env_color_override: &mut self.env_color_override,
+                    viewpoint_request: &mut self.viewpoint_request,
                 },
                 if thumbs.is_empty() {
                     panels::ThemeThumbs::None
@@ -686,8 +691,8 @@ impl eframe::App for ViewerApp {
         if dolly_mult != 1.0 {
             self.camera.dolly(dolly_mult);
         }
-        // Double-click on the viewport AND the Camera panel's "Reset view"
-        // button share the same fit-reset (Task 13).
+        // Double-click on the viewport AND the Viewpoints "Reset View"
+        // button share the same fit-reset.
         if reset || reset_view {
             match &self.state {
                 AppState::Ready(scene) => self
@@ -695,6 +700,13 @@ impl eframe::App for ViewerApp {
                     .fit(scene.bounds.center(), scene.bounds.bounding_sphere_radius()),
                 _ => self.camera.fit(Vec3::ZERO, 1.0),
             }
+        }
+        // Viewpoint preset buttons (View tab): set the camera to a fixed
+        // (elevation, rotation) pair — the original's Viewpoints section.
+        // Distance is preserved (the user keeps their zoom level).
+        if let Some((el, ro)) = self.viewpoint_request.take() {
+            self.camera.elevation_deg = el;
+            self.camera.rotation_deg = ro;
         }
 
         // Queue the frame for the paint callback's prepare phase (runs after
@@ -735,6 +747,7 @@ mod tests {
             rig_rot_deg: 0.0,
             light_color_override: [None; 3],
             env_color_override: None,
+            viewpoint_request: None,
             theme_thumbs: Vec::new(),
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],

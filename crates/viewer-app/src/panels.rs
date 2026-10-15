@@ -178,6 +178,9 @@ pub struct PanelState<'a> {
     pub light_color_override: &'a mut [Option<egui::Color32>; 3],
     /// Environment (ambient) color override (None = the theme's).
     pub env_color_override: &'a mut Option<egui::Color32>,
+    /// Requested camera viewpoint (elevation_deg, rotation_deg) — set by the
+    /// preset buttons in the View tab, applied by the app after the panel.
+    pub viewpoint_request: &'a mut Option<(f32, f32)>,
 }
 
 /// Theme thumbnails for the Lighting tab's 3×3 grid. `Textures` holds the
@@ -390,19 +393,55 @@ fn model_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
 }
 
 /// The View tab: camera + shading controls and the viewport toggles.
+/// Camera viewpoint presets matching the original app's Viewpoints section
+/// (elevation_deg, rotation_deg, label).
+const VIEWPOINTS: [(f32, f32, &str); 8] = [
+    (0.0, 0.0, "Front"),
+    (0.0, 180.0, "Back"),
+    (0.0, -90.0, "Left"),
+    (0.0, 90.0, "Right"),
+    (90.0, 0.0, "Top"),
+    (-90.0, 0.0, "Bottom"),
+    (35.264, 45.0, "Iso"),
+    (35.264, -135.0, "Iso 2"),
+];
+
 fn view_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
-    section_header(ui, "Camera & Shading");
-    ui.add(egui::Slider::new(s.fov_y_deg, 20.0..=90.0).text("FOV"));
-    ui.add(egui::Slider::new(s.exposure, -3.0..=3.0).text("Exposure"));
-    ui.add(egui::Slider::new(s.contrast, 0.2..=3.0).text("Contrast"));
-    if ui.button("Reset view").clicked() {
+    section_header(ui, "Viewpoints");
+    // 4×2 grid of preset camera angle buttons (original-style).
+    egui::Grid::new("viewpoints")
+        .num_columns(4)
+        .spacing([4.0, 4.0])
+        .show(ui, |ui| {
+            for chunk in VIEWPOINTS.chunks(4) {
+                for &(el, ro, label) in chunk {
+                    if ui
+                        .add_sized(
+                            [64.0, 28.0],
+                            egui::Button::new(egui::RichText::new(label).small()),
+                        )
+                        .clicked()
+                    {
+                        *s.viewpoint_request = Some((el, ro));
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    if ui.button("Reset View").clicked() {
         *s.reset_view = true;
     }
     ui.add_space(6.0);
     ui.separator();
-    section_header(ui, "Viewport");
-    ui.checkbox(s.ground, "Ground plane");
+    section_header(ui, "Camera & Shading");
+    ui.add(egui::Slider::new(s.fov_y_deg, 20.0..=90.0).text("FOV"));
+    ui.add(egui::Slider::new(s.exposure, -3.0..=3.0).text("Exposure"));
+    ui.add(egui::Slider::new(s.contrast, 0.2..=3.0).text("Contrast"));
+    ui.add_space(6.0);
+    ui.separator();
+    section_header(ui, "Grid");
     ui.checkbox(s.grid, "Grid");
+    ui.checkbox(s.ground, "Ground plane");
     ui.checkbox(s.bloom, "Bloom");
 }
 
@@ -705,6 +744,7 @@ mod tests {
         let mut rig_rot = 0.0f32;
         let mut light_override = [None; 3];
         let mut env_override = None;
+        let mut viewpoint_req = None;
         let mut active_tab = tab;
         let out = ctx.run_ui(input, |ui| {
             right_panel(
@@ -734,6 +774,7 @@ mod tests {
                     rig_rot_deg: &mut rig_rot,
                     light_color_override: &mut light_override,
                     env_color_override: &mut env_override,
+                    viewpoint_request: &mut viewpoint_req,
                     active_tab: &mut active_tab,
                 },
                 ThemeThumbs::None,
@@ -817,6 +858,7 @@ mod tests {
         let mut rig_rot = 0.0f32;
         let mut light_override = [None; 3];
         let mut env_override = None;
+        let mut viewpoint_req = None;
         let mut active_tab = 0usize;
         let out = ctx.run_ui(input, |ui| {
             right_panel(
@@ -842,6 +884,7 @@ mod tests {
                     rig_rot_deg: &mut rig_rot,
                     light_color_override: &mut light_override,
                     env_color_override: &mut env_override,
+                    viewpoint_request: &mut viewpoint_req,
                     active_tab: &mut active_tab,
                 },
                 ThemeThumbs::None,
