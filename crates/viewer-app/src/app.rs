@@ -611,8 +611,14 @@ impl eframe::App for ViewerApp {
         if menu.reset_settings {
             self.reset_all_settings();
         }
-        // About dialog (Help menu).
-        self.about_open = menu.about;
+        // About dialog (Help menu): only SET on click, never cleared here —
+        // the dialog itself clears the flag when OK is pressed. Assigning
+        // `self.about_open = menu.about` would reset it to false on the
+        // next frame (menu.about is a one-frame pulse), closing the dialog
+        // before it ever paints.
+        if menu.about {
+            self.about_open = true;
+        }
         panels::about_dialog(ui.ctx(), &mut self.about_open);
         // Exit (File menu).
         if menu.exit {
