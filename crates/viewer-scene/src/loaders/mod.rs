@@ -1,4 +1,5 @@
 // crates/viewer-scene/src/loaders/mod.rs
+pub mod fbx_loader;
 pub mod gltf_loader;
 pub mod obj_loader;
 pub mod ply_loader;
@@ -19,7 +20,7 @@ pub fn load(path: &std::path::Path) -> Result<Scene, LoadError> {
         Some("stl") => stl_loader::load(path)?,
         Some("ply") => ply_loader::load(path)?,
         Some("3mf") => three_mf::load(path)?,
-        Some("fbx") => return Err(LoadError::UnsupportedFormat("FBX".into())),
+        Some("fbx") => fbx_loader::load(path)?,
         other => {
             return Err(LoadError::Parse {
                 format: "file",

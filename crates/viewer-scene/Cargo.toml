@@ -11,3 +11,4 @@ tobj.workspace = true
 image.workspace = true
 zip.workspace = true
 quick-xml.workspace = true
+fbxcel-dom.workspace = true

@@ -140,7 +140,7 @@ const NOTE_DURATION: std::time::Duration = std::time::Duration::from_secs(4);
 fn failed_message(err: &viewer_scene::LoadError) -> String {
     match err {
         viewer_scene::LoadError::UnsupportedFormat(_) => {
-            format!("{err} — export the model to GLB, OBJ, STL, PLY or 3MF and open it again.")
+            format!("{err} — export the model to GLB, FBX, OBJ, STL, PLY or 3MF and open it again.")
         }
         other => other.to_string(),
     }
@@ -1080,7 +1080,7 @@ mod tests {
         let msg = failed_message(&viewer_scene::LoadError::UnsupportedFormat("FBX".into()));
         assert_eq!(
             msg,
-            "FBX files are not supported by this viewer — export the model to GLB, OBJ, STL, PLY or 3MF and open it again."
+            "FBX files are not supported by this viewer — export the model to GLB, FBX, OBJ, STL, PLY or 3MF and open it again."
         );
         let parse = failed_message(&viewer_scene::LoadError::Parse {
             format: "STL",
@@ -1127,7 +1127,7 @@ mod tests {
         app.poll_loading(&egui::Context::default());
         assert!(
             matches!(app.state, AppState::Failed(ref m)
-                if m.contains("FBX") && m.contains("GLB, OBJ, STL, PLY or 3MF")),
+                if m.contains("FBX") && m.contains("GLB, FBX, OBJ, STL, PLY or 3MF")),
             "unsupported-format failure must carry the export hint"
         );
         assert!(app.load_rx.is_none(), "finished channel must be dropped");

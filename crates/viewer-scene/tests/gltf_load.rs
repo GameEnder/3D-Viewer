@@ -212,11 +212,18 @@ fn loads_glb_mesh_material_animation() {
 }
 
 #[test]
-fn rejects_fbx_with_friendly_error() {
+fn fbx_loader_is_wired_not_unsupported() {
+    // FBX is now SUPPORTED (via fbxcel-dom). A nonexistent .fbx file gives
+    // an Io error (file-not-found), not UnsupportedFormat — proving the
+    // dispatch actually reaches the FBX loader.
     let err = viewer_scene::load(std::path::Path::new("model.fbx"))
         .err()
-        .expect("FBX must be rejected");
-    assert!(matches!(err, viewer_scene::LoadError::UnsupportedFormat(_)));
+        .expect("nonexistent FBX must error");
+    assert!(
+        !matches!(err, viewer_scene::LoadError::UnsupportedFormat(_)),
+        "FBX must no longer be rejected as unsupported: got {err:?}"
+    );
+    assert!(matches!(err, viewer_scene::LoadError::Io(_)));
 }
 
 #[test]

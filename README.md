@@ -19,8 +19,9 @@ fresh clone resolves a compatible toolchain automatically.
 
 ## Supported formats
 
-GLB, GLTF, OBJ, STL, PLY, 3MF. FBX files are rejected with a friendly
-"not supported by this viewer" message.
+GLB, GLTF, OBJ, STL, PLY, 3MF, and binary FBX (7.4/7.5, via
+[`fbxcel-dom`](https://github.com/lo48576/fbxcel-dom)). FBX ASCII format and
+FBX ≤6.0 are rejected with a friendly error message.
 
 ## Calibration harness
 

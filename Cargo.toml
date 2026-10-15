@@ -5,6 +5,7 @@ members = ["crates/viewer-scene", "crates/viewer-render", "crates/viewer-app"]
 [workspace.dependencies]
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
 egui-wgpu = "0.36"
+fbxcel-dom = "0.0.10"
 glam = "0.30"
 gltf = "1"
 tobj = "4"
