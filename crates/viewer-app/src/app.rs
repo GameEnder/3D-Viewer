@@ -10,6 +10,38 @@ use crate::paint;
 use crate::panels;
 use crate::themes::{THEMES, frame_lights};
 
+/// Compute the Model tab's mesh + texture statistics from a loaded scene
+/// (original-style Mesh Data + Texture Data rows).
+fn model_stats(scene: &viewer_scene::Scene) -> panels::ModelStats {
+    let mut stats = panels::ModelStats {
+        tri_count: scene.tri_count,
+        vert_count: scene.vert_count,
+        ..panels::ModelStats::default()
+    };
+    // UV sets: any mesh with UV coordinates.
+    stats.has_uv_set_0 = scene.meshes.iter().any(|m| !m.uvs.is_empty());
+    // The engine only loads UV set 0; set 1 would need glTF's TEXCOORD_1.
+    stats.has_uv_set_1 = false;
+    // Texture channel counts: how many materials carry each texture type.
+    stats.material_count = scene.materials.len() as u32;
+    for mat in &scene.materials {
+        if mat.base_color_texture.is_some() {
+            stats.albedo_count += 1;
+        }
+        if mat.normal_map.is_some() {
+            stats.normal_count += 1;
+        }
+        if mat.metallic_roughness_texture.is_some() {
+            stats.gloss_count += 1;
+        }
+        if mat.emissive_texture.is_some() {
+            stats.emissive_count += 1;
+        }
+        // Occlusion: the engine doesn't load occlusion maps (future work).
+    }
+    stats
+}
+
 /// File-loading state machine (Task 8 brief Step 3).
 pub enum AppState {
     Idle,
@@ -549,13 +581,9 @@ impl eframe::App for ViewerApp {
         let top = panels::top_strip(ui);
         let mut reset_view = false;
         {
-            let (source_name, tri_count, vert_count) = match &self.state {
-                AppState::Ready(scene) => (
-                    Some(scene.source_name.as_str()),
-                    scene.tri_count,
-                    scene.vert_count,
-                ),
-                _ => (None, 0, 0),
+            let (source_name, stats) = match &self.state {
+                AppState::Ready(scene) => (Some(scene.source_name.as_str()), model_stats(scene)),
+                _ => (None, panels::ModelStats::default()),
             };
             let ctx = ui.ctx();
             if self.thumb_textures.is_empty() && !self.theme_thumbs.is_empty() {
@@ -608,8 +636,7 @@ impl eframe::App for ViewerApp {
                     grid: &mut self.grid,
                     bloom: &mut self.bloom,
                     source_name,
-                    tri_count,
-                    vert_count,
+                    stats,
                     rot_offset_deg: &mut self.rot_offset_deg,
                     model_scale: &mut self.model_scale,
                     fov_y_deg: &mut self.camera.fov_y_deg,

@@ -163,8 +163,8 @@ pub struct PanelState<'a> {
     pub grid: &'a mut bool,
     pub bloom: &'a mut bool,
     pub source_name: Option<&'a str>,
-    pub tri_count: u32,
-    pub vert_count: u32,
+    /// Computed mesh + texture statistics (original-style).
+    pub stats: ModelStats,
     pub rot_offset_deg: &'a mut f32,
     pub model_scale: &'a mut f32,
     pub fov_y_deg: &'a mut f32,
@@ -371,6 +371,23 @@ fn theme_grid_swatches(ui: &mut egui::Ui, theme_idx: &mut usize) {
 /// The Model tab: mesh stats + the wireframe toggle (the original keeps its
 /// triangle display under "Mesh Data" in its Stats & Shading tab), then the
 /// transform controls.
+/// Computed model statistics (original-style Mesh Data + Texture Data).
+/// The app fills this from the loaded scene; the panel displays it read-only.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ModelStats {
+    pub tri_count: u32,
+    pub vert_count: u32,
+    pub has_uv_set_0: bool,
+    pub has_uv_set_1: bool,
+    /// How many materials carry each texture channel.
+    pub albedo_count: u32,
+    pub normal_count: u32,
+    pub gloss_count: u32,
+    pub occlusion_count: u32,
+    pub emissive_count: u32,
+    pub material_count: u32,
+}
+
 fn model_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
     section_header(ui, "Mesh Data");
     match s.source_name {
@@ -379,8 +396,18 @@ fn model_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
                 ui.label("File:");
                 ui.label(name);
             });
-            ui.label(format!("Triangles: {}", s.tri_count));
-            ui.label(format!("Vertices: {}", s.vert_count));
+            ui.separator();
+            let m = s.stats;
+            ui.label(format!("Triangles: {}", m.tri_count));
+            ui.label(format!("Vertices: {}", m.vert_count));
+            ui.label(format!(
+                "UV Set 0: {}",
+                if m.has_uv_set_0 { "Yes" } else { "No" }
+            ));
+            ui.label(format!(
+                "UV Set 1: {}",
+                if m.has_uv_set_1 { "Yes" } else { "No" }
+            ));
         }
         None => {
             ui.label("No model loaded");
@@ -388,6 +415,21 @@ fn model_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
     }
     ui.add_space(4.0);
     ui.checkbox(s.wireframe, "Wireframe");
+    ui.add_space(6.0);
+    ui.separator();
+    section_header(ui, "Texture Data");
+    let m = s.stats;
+    ui.label(format!("Albedo: {} / {}", m.albedo_count, m.material_count));
+    ui.label(format!("Normal: {} / {}", m.normal_count, m.material_count));
+    ui.label(format!("Gloss: {} / {}", m.gloss_count, m.material_count));
+    ui.label(format!(
+        "Occlusion: {} / {}",
+        m.occlusion_count, m.material_count
+    ));
+    ui.label(format!(
+        "Emissive: {} / {}",
+        m.emissive_count, m.material_count
+    ));
     ui.add_space(6.0);
     ui.separator();
     section_header(ui, "Transform");
@@ -791,8 +833,11 @@ mod tests {
                     } else {
                         None
                     },
-                    tri_count: 123_456,
-                    vert_count: 65_432,
+                    stats: ModelStats {
+                        tri_count: 123_456,
+                        vert_count: 65_432,
+                        ..ModelStats::default()
+                    },
                     rot_offset_deg: &mut offset,
                     model_scale: &mut scale,
                     fov_y_deg: &mut fov,
@@ -902,8 +947,7 @@ mod tests {
                     grid: &mut grid,
                     bloom: &mut bloom,
                     source_name: None,
-                    tri_count: 0,
-                    vert_count: 0,
+                    stats: ModelStats::default(),
                     rot_offset_deg: &mut offset,
                     model_scale: &mut scale,
                     fov_y_deg: &mut fov,
