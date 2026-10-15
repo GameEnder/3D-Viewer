@@ -120,6 +120,13 @@ pub const THEMES: [Theme; 9] = [
 
 fn srgb_to_linear(c: u8) -> f32 {
     let v = c as f32 / 255.0;
+    srgb_norm_to_linear(v)
+}
+
+/// Exact sRGB piecewise transfer for a normalized (0.0..1.0) value.
+/// Public for the app's color-override path (Lighting panel pickers hand
+/// back egui::Color32, already normalized).
+pub fn srgb_norm_to_linear(v: f32) -> f32 {
     if v <= 0.04045 {
         v / 12.92
     } else {

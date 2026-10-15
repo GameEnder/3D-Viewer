@@ -65,6 +65,13 @@ pub struct ViewerApp {
     contrast: f32,
     /// Active right-panel tab (0 Lighting, 1 Model, 2 View).
     active_tab: usize,
+    /// Rig rotation offset in degrees, ADDED to the theme's rig rotation
+    /// (Lighting panel drag, 0..360).
+    rig_rot_deg: f32,
+    /// Per-light color overrides (Lighting panel pickers; None = theme's).
+    light_color_override: [Option<egui::Color32>; 3],
+    /// Environment (ambient) color override (None = theme's).
+    env_color_override: Option<egui::Color32>,
     /// GPU-rendered theme thumbnails (one per theme, original-style swatch
     /// grid). Rendered once at startup; empty when no GPU is available (the
     /// panel then falls back to colored name swatches).
@@ -153,6 +160,9 @@ impl ViewerApp {
             last_size: [0.0, 0.0],
             theme_idx: 0,
             active_tab: 0,
+            rig_rot_deg: 0.0,
+            light_color_override: [None; 3],
+            env_color_override: None,
             theme_thumbs,
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],
@@ -180,12 +190,38 @@ impl ViewerApp {
     /// The panel's Shadows toggle is an app-level override forcing
     /// `shadows = false` on every light when off.
     fn themed_lights(&self) -> ([LightInput; 3], [f32; 3], f32) {
-        let (mut lights, (env_color, env_intensity)) =
+        let (mut lights, (mut env_color, env_intensity)) =
             frame_lights(&THEMES[self.theme_idx], self.light_mult, self.env_mult);
         if !self.shadows_enabled {
             for light in &mut lights {
                 light.shadows = false;
             }
+        }
+        // Rig rotation offset (Lighting panel): rotates the whole 3-light
+        // rig around the model on top of the theme's base rotation.
+        if self.rig_rot_deg != 0.0 {
+            let base = THEMES[self.theme_idx].rig_rot_deg;
+            for (i, light) in lights.iter_mut().enumerate() {
+                light.pos = crate::themes::light_pos(i, base + self.rig_rot_deg);
+            }
+        }
+        // Per-light color overrides (Lighting panel pickers).
+        for (i, light) in lights.iter_mut().enumerate() {
+            if let Some(c) = self.light_color_override[i] {
+                light.color = [
+                    crate::themes::srgb_norm_to_linear(f32::from(c.r()) / 255.0),
+                    crate::themes::srgb_norm_to_linear(f32::from(c.g()) / 255.0),
+                    crate::themes::srgb_norm_to_linear(f32::from(c.b()) / 255.0),
+                ];
+            }
+        }
+        // Environment (ambient) color override.
+        if let Some(c) = self.env_color_override {
+            env_color = [
+                crate::themes::srgb_norm_to_linear(f32::from(c.r()) / 255.0),
+                crate::themes::srgb_norm_to_linear(f32::from(c.g()) / 255.0),
+                crate::themes::srgb_norm_to_linear(f32::from(c.b()) / 255.0),
+            ];
         }
         (lights, env_color, env_intensity)
     }
@@ -518,6 +554,9 @@ impl eframe::App for ViewerApp {
                     contrast: &mut self.contrast,
                     reset_view: &mut reset_view,
                     active_tab: &mut self.active_tab,
+                    rig_rot_deg: &mut self.rig_rot_deg,
+                    light_color_override: &mut self.light_color_override,
+                    env_color_override: &mut self.env_color_override,
                 },
                 if thumbs.is_empty() {
                     panels::ThemeThumbs::None
@@ -693,6 +732,9 @@ mod tests {
             last_size: [0.0, 0.0],
             theme_idx: 0,
             active_tab: 0,
+            rig_rot_deg: 0.0,
+            light_color_override: [None; 3],
+            env_color_override: None,
             theme_thumbs: Vec::new(),
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],

@@ -172,6 +172,12 @@ pub struct PanelState<'a> {
     pub contrast: &'a mut f32,
     pub reset_view: &'a mut bool,
     pub active_tab: &'a mut usize,
+    /// Rig rotation offset in degrees, added to the theme's rotation.
+    pub rig_rot_deg: &'a mut f32,
+    /// Per-light color overrides (None = use the theme's color).
+    pub light_color_override: &'a mut [Option<egui::Color32>; 3],
+    /// Environment (ambient) color override (None = the theme's).
+    pub env_color_override: &'a mut Option<egui::Color32>,
 }
 
 /// Theme thumbnails for the Lighting tab's 3×3 grid. `Textures` holds the
@@ -236,7 +242,8 @@ fn section_header(ui: &mut egui::Ui, name: &str) {
 }
 
 /// The Lighting tab: the theme grid (thumbnails or swatch fallback), the
-/// per-light intensities and the environment/shadows controls.
+/// per-light color/intensity controls (original-style pickers), the
+/// environment controls and the rig rotation.
 fn lighting_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>, thumbs: ThemeThumbs<'_>) {
     section_header(ui, "Themes");
     match thumbs {
@@ -246,20 +253,57 @@ fn lighting_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>, thumbs: ThemeThumbs<'
     ui.add_space(6.0);
     ui.separator();
     section_header(ui, "Lights & Environment");
+    let theme = &THEMES[*s.theme_idx];
     for (n, mult) in s.light_mult.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             ui.label(format!("Light {}", n + 1));
+            // Color picker: shows the theme's color (or the user override);
+            // picking a color sets the override; the ↺ clears it.
+            let current = s.light_color_override[n].unwrap_or_else(|| {
+                let [r, g, b] = theme.lights[n].rgb;
+                egui::Color32::from_rgb(r, g, b)
+            });
+            let mut color = current;
+            if ui.color_edit_button_srgba(&mut color).changed() {
+                s.light_color_override[n] = Some(color);
+            }
             ui.add(egui::DragValue::new(mult).range(0.0..=3.0).speed(0.01));
+            if s.light_color_override[n].is_some() && ui.small_button("↺").clicked() {
+                s.light_color_override[n] = None;
+            }
         });
     }
     ui.horizontal(|ui| {
         ui.label("Environment");
+        let current = s.env_color_override.unwrap_or_else(|| {
+            let [r, g, b] = theme.env.rgb;
+            egui::Color32::from_rgb(r, g, b)
+        });
+        let mut color = current;
+        if ui.color_edit_button_srgba(&mut color).changed() {
+            *s.env_color_override = Some(color);
+        }
         ui.add(
             egui::DragValue::new(s.env_mult)
                 .range(0.0..=3.0)
                 .speed(0.01),
         );
+        if s.env_color_override.is_some() && ui.small_button("↺").clicked() {
+            *s.env_color_override = None;
+        }
     });
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Light Rotation");
+        ui.add(
+            egui::DragValue::new(s.rig_rot_deg)
+                .range(0.0..=360.0)
+                .suffix("°")
+                .speed(1.0),
+        );
+    });
+    ui.add_space(4.0);
+    ui.separator();
     ui.checkbox(s.shadows_enabled, "Shadows");
 }
 
@@ -665,6 +709,9 @@ mod tests {
         let mut bloom = true;
         let (mut offset, mut scale) = (0.0f32, 1.0f32);
         let (mut fov, mut exposure, mut contrast, mut reset) = (45.0f32, 0.5f32, 1.66f32, false);
+        let mut rig_rot = 0.0f32;
+        let mut light_override = [None; 3];
+        let mut env_override = None;
         let mut active_tab = tab;
         let out = ctx.run_ui(input, |ui| {
             right_panel(
@@ -691,6 +738,9 @@ mod tests {
                     exposure: &mut exposure,
                     contrast: &mut contrast,
                     reset_view: &mut reset,
+                    rig_rot_deg: &mut rig_rot,
+                    light_color_override: &mut light_override,
+                    env_color_override: &mut env_override,
                     active_tab: &mut active_tab,
                 },
                 ThemeThumbs::None,
@@ -771,6 +821,9 @@ mod tests {
         let mut bloom = true;
         let (mut offset, mut scale) = (0.0f32, 1.0f32);
         let (mut fov, mut exposure, mut contrast, mut reset) = (45.0f32, 0.5f32, 1.66f32, false);
+        let mut rig_rot = 0.0f32;
+        let mut light_override = [None; 3];
+        let mut env_override = None;
         let mut active_tab = 0usize;
         let out = ctx.run_ui(input, |ui| {
             right_panel(
@@ -793,6 +846,9 @@ mod tests {
                     exposure: &mut exposure,
                     contrast: &mut contrast,
                     reset_view: &mut reset,
+                    rig_rot_deg: &mut rig_rot,
+                    light_color_override: &mut light_override,
+                    env_color_override: &mut env_override,
                     active_tab: &mut active_tab,
                 },
                 ThemeThumbs::None,
