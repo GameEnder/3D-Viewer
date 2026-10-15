@@ -490,6 +490,7 @@ pub fn bottom_bar(ui: &mut egui::Ui, s: BottomBarState<'_>) {
         .resizable(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                // Left: turntable transport (always).
                 let play_label = if *s.turntable { "⏸" } else { "▶" };
                 if ui
                     .button(play_label)
@@ -509,77 +510,76 @@ pub fn bottom_bar(ui: &mut egui::Ui, s: BottomBarState<'_>) {
                 {
                     *s.turntable_reset = true;
                 }
+                // Center: animation scrubber (when clips exist) — the original
+                // keeps the timeline here, with clip selection on the right.
                 if !s.animations.is_empty() {
                     ui.separator();
-                    animation_transport(ui, s.anim, s.animations);
+                    let clip = s.anim.clip.min(s.animations.len() - 1);
+                    let label = if s.anim.playing { "Pause" } else { "Play" };
+                    if ui
+                        .add_sized(
+                            [56.0, 22.0],
+                            egui::Button::new(egui::RichText::new(label).small()),
+                        )
+                        .clicked()
+                    {
+                        s.anim.playing = !s.anim.playing;
+                    }
+                    let dur = s.animations[clip].duration.max(0.0);
+                    let range = if dur > 0.0 { 0.0..=dur } else { 0.0..=1.0 };
+                    ui.add(egui::Slider::new(&mut s.anim.time, range).show_value(true));
                 }
-                if s.animations.is_empty() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Right: Quick Animations + speed (original-style).
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if s.animations.is_empty() {
+                        // No clips: turntable speed on the right.
                         ui.add(
                             egui::DragValue::new(s.turntable_speed)
                                 .range(0.0..=90.0)
                                 .suffix(" °/s"),
                         )
                         .on_hover_text("Turntable speed");
-                    });
-                }
+                    } else {
+                        // Animation speed drag (× multiplier).
+                        ui.add(
+                            egui::DragValue::new(&mut s.anim.speed)
+                                .range(0.1..=4.0)
+                                .speed(0.01)
+                                .prefix("×"),
+                        );
+                        // "Normal animation speed" reset button.
+                        if ui
+                            .small_button("Normal")
+                            .on_hover_text("Reset animation speed to ×1.0")
+                            .clicked()
+                        {
+                            s.anim.speed = 1.0;
+                        }
+                        // Quick Animations dropdown (clip selector).
+                        let clip = s.anim.clip.min(s.animations.len() - 1);
+                        let clip_label = |i: usize| {
+                            let name = &s.animations[i].name;
+                            if name.is_empty() {
+                                format!("Clip {}", i + 1)
+                            } else {
+                                name.clone()
+                            }
+                        };
+                        let prev = s.anim.clip;
+                        egui::ComboBox::from_id_salt("quick_animations")
+                            .selected_text(format!("🎬 {}", clip_label(clip)))
+                            .show_ui(ui, |ui| {
+                                for i in 0..s.animations.len() {
+                                    ui.selectable_value(&mut s.anim.clip, i, clip_label(i));
+                                }
+                            });
+                        if s.anim.clip != prev {
+                            s.anim.time = 0.0;
+                        }
+                    }
+                });
             });
         });
-}
-
-/// The animation transport (Task 17's bar body): clip picker, Play/Pause,
-/// a scrub slider that writes `time` directly (playing state untouched) and
-/// the speed drag. Switching clips restarts playback at t = 0.
-fn animation_transport(
-    ui: &mut egui::Ui,
-    anim: &mut AnimationState,
-    animations: &[viewer_scene::Animation],
-) {
-    // Defensive clip clamp (the app resets state per load, so the clip is in
-    // range; a stale index must not panic here).
-    let clip = anim.clip.min(animations.len() - 1);
-    let clip_label = |i: usize| {
-        let name = &animations[i].name;
-        if name.is_empty() {
-            format!("Clip {}", i + 1)
-        } else {
-            name.clone()
-        }
-    };
-    let prev = anim.clip;
-    egui::ComboBox::from_id_salt("animation_clip")
-        .selected_text(clip_label(clip))
-        .show_ui(ui, |ui| {
-            for i in 0..animations.len() {
-                ui.selectable_value(&mut anim.clip, i, clip_label(i));
-            }
-        });
-    if anim.clip != prev {
-        anim.time = 0.0;
-    }
-    let label = if anim.playing { "Pause" } else { "Play" };
-    if ui
-        .add_sized(
-            [56.0, 22.0],
-            egui::Button::new(egui::RichText::new(label).small()),
-        )
-        .clicked()
-    {
-        anim.playing = !anim.playing;
-    }
-    let dur = animations[clip].duration.max(0.0);
-    let range = if dur > 0.0 { 0.0..=dur } else { 0.0..=1.0 };
-    ui.add(
-        egui::Slider::new(&mut anim.time, range)
-            .text("t")
-            .show_value(true),
-    );
-    ui.add(
-        egui::DragValue::new(&mut anim.speed)
-            .range(0.1..=4.0)
-            .speed(0.01)
-            .prefix("×"),
-    );
 }
 
 #[cfg(test)]
