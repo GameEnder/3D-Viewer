@@ -240,9 +240,8 @@ fn section_header(ui: &mut egui::Ui, name: &str) {
     ui.label(egui::RichText::new(name).heading());
     ui.add_space(2.0);
 }
-
 /// The Lighting tab: the theme grid (thumbnails or swatch fallback), the
-/// per-light color/intensity controls (original-style pickers), the
+/// per-light color/intensity controls (original-style sliders), the
 /// environment controls and the rig rotation.
 fn lighting_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>, thumbs: ThemeThumbs<'_>) {
     section_header(ui, "Themes");
@@ -255,6 +254,7 @@ fn lighting_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>, thumbs: ThemeThumbs<'
     section_header(ui, "Lights & Environment");
     let theme = &THEMES[*s.theme_idx];
     for (n, mult) in s.light_mult.iter_mut().enumerate() {
+        // Color + intensity per light (original-style: swatch + slider).
         ui.horizontal(|ui| {
             ui.label(format!("Light {}", n + 1));
             // Color picker: shows the theme's color (or the user override);
@@ -267,11 +267,11 @@ fn lighting_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>, thumbs: ThemeThumbs<'
             if ui.color_edit_button_srgba(&mut color).changed() {
                 s.light_color_override[n] = Some(color);
             }
-            ui.add(egui::DragValue::new(mult).range(0.0..=3.0).speed(0.01));
             if s.light_color_override[n].is_some() && ui.small_button("↺").clicked() {
                 s.light_color_override[n] = None;
             }
         });
+        ui.add(egui::Slider::new(mult, 0.0..=3.0).show_value(true));
     }
     ui.horizontal(|ui| {
         ui.label("Environment");
@@ -283,25 +283,18 @@ fn lighting_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>, thumbs: ThemeThumbs<'
         if ui.color_edit_button_srgba(&mut color).changed() {
             *s.env_color_override = Some(color);
         }
-        ui.add(
-            egui::DragValue::new(s.env_mult)
-                .range(0.0..=3.0)
-                .speed(0.01),
-        );
         if s.env_color_override.is_some() && ui.small_button("↺").clicked() {
             *s.env_color_override = None;
         }
     });
+    ui.add(egui::Slider::new(s.env_mult, 0.0..=3.0).show_value(true));
     ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Light Rotation");
-        ui.add(
-            egui::DragValue::new(s.rig_rot_deg)
-                .range(0.0..=360.0)
-                .suffix("°")
-                .speed(1.0),
-        );
-    });
+    ui.label("Light Rotation");
+    ui.add(
+        egui::Slider::new(s.rig_rot_deg, 0.0..=360.0)
+            .suffix("°")
+            .show_value(true),
+    );
     ui.add_space(4.0);
     ui.separator();
     ui.checkbox(s.shadows_enabled, "Shadows");
