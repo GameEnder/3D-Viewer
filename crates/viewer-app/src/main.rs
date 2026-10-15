@@ -1,11 +1,23 @@
 // crates/viewer-app/src/main.rs
 mod app;
 mod camera;
+mod file_assoc;
 mod paint;
 mod panels;
 mod themes;
 
 fn main() -> eframe::Result<()> {
+    // Command-line file argument: when Explorer double-click-opens a model
+    // file with this app, the path arrives as argv[1].
+    let initial_file = std::env::args()
+        .nth(1)
+        .filter(|s| {
+            // Only accept an argument that is an existing file (not a flag).
+            let p = std::path::Path::new(s);
+            p.is_file()
+        })
+        .map(std::path::PathBuf::from);
+
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("3D Viewer")
@@ -15,6 +27,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "3D Viewer",
         options,
-        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc)))),
+        Box::new(|cc| {
+            Ok(Box::new(
+                app::ViewerApp::new(cc).with_initial_file(initial_file),
+            ))
+        }),
     )
 }

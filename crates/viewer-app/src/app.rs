@@ -129,6 +129,8 @@ pub struct ViewerApp {
     note: Option<(String, std::time::Instant)>,
     /// Whether the About dialog (Help menu) is open.
     about_open: bool,
+    /// Preferences dialog state (Edit → Preferences: file associations).
+    prefs: panels::PreferencesState,
 }
 
 /// How long a transient status note stays visible (Task 18).
@@ -147,6 +149,20 @@ fn failed_message(err: &viewer_scene::LoadError) -> String {
 }
 
 impl ViewerApp {
+    /// Consume a file path from the command line (Explorer double-click)
+    /// and start loading it immediately. Called by main() after `new()`.
+    pub fn with_initial_file(mut self, path: Option<std::path::PathBuf>) -> Self {
+        if let Some(path) = path {
+            self.state = AppState::Loading;
+            let (tx, rx) = std::sync::mpsc::channel::<LoadResult>();
+            std::thread::spawn(move || {
+                let _ = tx.send(viewer_scene::load(&path));
+            });
+            self.load_rx = Some(rx);
+        }
+        self
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // cc.wgpu_render_state is a FIELD in eframe 0.36 (Option<RenderState>;
         // RenderState itself is cloned, no outer Arc in 0.36).
@@ -230,6 +246,7 @@ impl ViewerApp {
             anim: panels::AnimationState::default(),
             note: None,
             about_open: false,
+            prefs: panels::PreferencesState::default(),
         }
     }
 
@@ -620,6 +637,11 @@ impl eframe::App for ViewerApp {
             self.about_open = true;
         }
         panels::about_dialog(ui.ctx(), &mut self.about_open);
+        // Preferences dialog (Edit → Preferences).
+        if menu.preferences {
+            self.prefs.open = true;
+        }
+        panels::preferences_dialog(ui.ctx(), &mut self.prefs);
         // Exit (File menu).
         if menu.exit {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -905,6 +927,7 @@ mod tests {
             anim: panels::AnimationState::default(),
             note: None,
             about_open: false,
+            prefs: panels::PreferencesState::default(),
         }
     }
 

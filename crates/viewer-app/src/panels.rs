@@ -101,6 +101,8 @@ pub struct MenuBarOutcome {
     pub reset_view: bool,
     /// Show the About dialog.
     pub about: bool,
+    /// Open the Preferences (file associations) dialog.
+    pub preferences: bool,
 }
 
 /// The traditional top menu bar (original-style: File / Edit / Tools /
@@ -137,6 +139,10 @@ pub fn menu_bar(ui: &mut egui::Ui) -> MenuBarOutcome {
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Reset All Settings").clicked() {
                         out.reset_settings = true;
+                        ui.close();
+                    }
+                    if ui.button("Preferences…").clicked() {
+                        out.preferences = true;
                         ui.close();
                     }
                 });
@@ -191,6 +197,115 @@ pub fn about_dialog(ctx: &egui::Context, open: &mut bool) {
             ui.add_space(8.0);
             if ui.button("OK").clicked() {
                 *open = false;
+            }
+        });
+}
+
+/// Preferences dialog (Edit → Preferences): Windows file association
+/// management. Shows the current registration status and offers
+/// register / unregister buttons. On non-Windows, the dialog shows a note.
+#[derive(Default)]
+pub struct PreferencesState {
+    pub open: bool,
+    /// Result message from the last register/unregister action.
+    pub message: Option<Result<usize, String>>,
+}
+
+pub fn preferences_dialog(ctx: &egui::Context, s: &mut PreferencesState) {
+    if !s.open {
+        return;
+    }
+    egui::Window::new("Preferences")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.heading("File Associations");
+            ui.add_space(4.0);
+
+            #[cfg(windows)]
+            {
+                ui.label("Make 3D Viewer the default app for these file types:");
+                ui.add_space(6.0);
+
+                // Show the extension list with current handler info.
+                let registered = crate::file_assoc::is_registered();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(if registered {
+                            "Status: Registered ✓"
+                        } else {
+                            "Status: Not registered"
+                        })
+                        .color(if registered {
+                            egui::Color32::from_rgb(100, 200, 100)
+                        } else {
+                            ui.style().visuals.warn_fg_color
+                        }),
+                    );
+                });
+                ui.add_space(4.0);
+
+                for ext in crate::file_assoc::EXTENSIONS {
+                    let handler = crate::file_assoc::default_handler(ext);
+                    ui.horizontal(|ui| {
+                        ui.label(format!(".{ext}"));
+                        match handler {
+                            Some(h) => {
+                                let ours = h == crate::file_assoc::PROG_ID;
+                                let mark = if ours { "→ 3D Viewer" } else { "" };
+                                ui.weak(format!("({h}){mark}"))
+                            }
+                            None => ui.weak("(no default)"),
+                        }
+                    });
+                }
+
+                ui.add_space(8.0);
+
+                // Action result message.
+                if let Some(msg) = &s.message {
+                    match msg {
+                        Ok(n) => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(100, 200, 100),
+                                format!("Done — {n} extensions updated."),
+                            );
+                        }
+                        Err(e) => {
+                            ui.colored_label(
+                                ui.style().visuals.error_fg_color,
+                                format!("Error: {e}"),
+                            );
+                        }
+                    }
+                    ui.add_space(4.0);
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Register all").clicked() {
+                        s.message = Some(crate::file_assoc::register().map_err(|e| e.to_string()));
+                    }
+                    if ui.button("Unregister all").clicked() {
+                        s.message =
+                            Some(crate::file_assoc::unregister().map_err(|e| e.to_string()));
+                    }
+                });
+                ui.add_space(4.0);
+                ui.weak(
+                    "Note: Explorer may need a refresh (F5 on the desktop) or a restart \
+                     for icons to update. No admin rights required.",
+                );
+            }
+
+            #[cfg(not(windows))]
+            {
+                ui.label("File associations are only supported on Windows.");
+            }
+
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                s.open = false;
             }
         });
 }

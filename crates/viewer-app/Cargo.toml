@@ -13,6 +13,9 @@ pollster.workspace = true
 rfd.workspace = true
 image.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
 [[bin]]
 name = "viewer"
 path = "src/main.rs"
