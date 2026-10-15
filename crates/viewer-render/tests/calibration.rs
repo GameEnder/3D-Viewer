@@ -276,9 +276,12 @@ fn wireframe_sparse_triangle_shows_structure() {
         }
     }
     println!("sparse wireframe (full frame): min {min_g}, max {max_g}");
+    // Light-edge wireframe (matches the original's "Triangles" view): the
+    // thin pale edges push the brightest pixels well ABOVE the shaded
+    // surface, while the surface shading itself stays intact below.
     assert!(
-        min_g < 70 && max_g > 110,
-        "sparse wireframe must show dark edges AND a shaded interior \
+        max_g > 170 && (90..=115).contains(&min_g),
+        "sparse wireframe must show light edges over a shaded surface \
          (min {min_g}, max {max_g})"
     );
 }
@@ -303,16 +306,74 @@ fn wireframe_dense_surface_keeps_shading() {
     println!("dense mean: plain {plain:.1}, wireframe {wire:.1} (r {mr:.1} vs b {mb:.1})");
     // The user-reported bug history: the wireframe first washed dense models
     // uniformly blue, then (darkening fix) still cost ~50% of the shading.
-    // The density-aware fade keeps ~97% of the shading; lock that in.
+    // With the light-edge style + density fade the surface keeps its shading
+    // (the pale lines lift the mean only slightly); lock that band in.
     assert!(
-        wire >= 0.85 * plain,
-        "dense wireframe washes out the surface: plain {plain:.1} vs \
-         wireframe {wire:.1}"
+        wire >= 0.9 * plain && wire <= 1.25 * plain,
+        "dense wireframe alters the surface shading too much: plain \
+         {plain:.1} vs wireframe {wire:.1}"
     );
     assert!(
         (mr - mb).abs() <= 6.0,
         "dense wireframe must stay hue-neutral (r {mr:.1} vs b {mb:.1} — \
          the old flat dark-blue line color tinted the model blue)"
+    );
+}
+
+#[test]
+#[ignore = "headless GPU probe; run with --ignored"]
+fn theme_thumbnail_renders_model() {
+    // The preview scene + one render: the thumbnail must contain the lit
+    // model (bright pixels well above the dark background) and some shadow.
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .expect("no GPU adapter");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&Default::default())).expect("no GPU device");
+
+    let lights = default_rig();
+    let img = viewer_render::preview::render(
+        &device,
+        &queue,
+        96,
+        viewer_render::FrameParams {
+            view_proj: viewer_render::preview::camera_view_proj(),
+            camera_pos: viewer_render::preview::camera_pos(),
+            turntable_deg: 0.0,
+            model_scale: 1.0,
+            lights,
+            env_color: [srgb_to_linear(1.0); 3],
+            env_intensity: 0.4,
+            anim: None,
+            settings: viewer_render::RenderSettings {
+                clear_color: [0.03, 0.03, 0.035],
+                wireframe: false,
+                ground: true,
+                grid: false,
+                bloom: false,
+                exposure: 0.5,
+                contrast: 1.66,
+                ground_opacity: 0.4,
+                shadows: true,
+            },
+        },
+    );
+    let (mut min_g, mut max_g) = (255u32, 0u32);
+    for px in img.as_chunks::<4>().0 {
+        let g = (px[0] as u32 + px[1] as u32 + px[2] as u32) / 3;
+        min_g = min_g.min(g);
+        max_g = max_g.max(g);
+    }
+    println!("thumbnail: min {min_g}, max {max_g}");
+    assert!(
+        max_g > 140 && min_g < 60,
+        "thumbnail must show a lit model over a dark background \
+         (min {min_g}, max {max_g})"
     );
 }
 

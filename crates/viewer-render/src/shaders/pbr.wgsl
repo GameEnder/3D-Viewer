@@ -193,8 +193,10 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
     // and zooming in resolves the wireframe naturally.
     let fade = clamp(tri_px / 3.0, 0.15, 1.0);
     let line = (1.0 - smoothstep(0.6, 1.6, px)) * fade;
-    // Lines darken the shaded surface (neutral, keeps hue and lighting).
-    col = mix(col, col * vec3<f32>(0.4), line * 0.85);
+    // Thin LIGHT edges, matching the original app's "Triangles" mesh-data
+    // view (subtle etched look over the shaded surface - its edges read as
+    // pale lines on the lit model). Density fade keeps dense surfaces intact.
+    col = mix(col, vec3<f32>(0.85), line * 0.85);
   }
   // Task 7 adaptation: the resolved HDR buffer's alpha doubles as a background
   // marker for post.wgsl (dst alpha < 0.5 = background -> untonemapped clear

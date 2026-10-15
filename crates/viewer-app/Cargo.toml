@@ -9,6 +9,7 @@ egui-wgpu.workspace = true
 viewer-scene.workspace = true
 viewer-render.workspace = true
 glam.workspace = true
+pollster.workspace = true
 rfd.workspace = true
 image.workspace = true
 

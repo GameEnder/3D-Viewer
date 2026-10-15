@@ -35,6 +35,7 @@
 
 pub mod gpu_scene;
 pub mod post;
+pub mod preview;
 pub mod uniforms;
 
 use std::cmp::Ordering;

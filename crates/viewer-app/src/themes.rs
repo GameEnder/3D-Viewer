@@ -348,3 +348,58 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod thumbnail_dump {
+    use super::*;
+    use egui_wgpu::wgpu;
+
+    #[test]
+    #[ignore = "dump theme thumbnails to %TEMP%\\opencode"]
+    fn dump() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        for theme in THEMES.iter() {
+            let (lights, (env, env_i)) = frame_lights(theme, [1.0; 3], 1.0);
+            let img = viewer_render::preview::render(
+                &device,
+                &queue,
+                96,
+                viewer_render::FrameParams {
+                    view_proj: viewer_render::preview::camera_view_proj(),
+                    camera_pos: viewer_render::preview::camera_pos(),
+                    turntable_deg: 0.0,
+                    model_scale: 1.0,
+                    lights,
+                    env_color: env,
+                    env_intensity: env_i,
+                    anim: None,
+                    settings: viewer_render::RenderSettings {
+                        clear_color: [0.03, 0.03, 0.035],
+                        wireframe: false,
+                        ground: true,
+                        grid: false,
+                        bloom: false,
+                        exposure: 0.5,
+                        contrast: 1.66,
+                        ground_opacity: 0.4,
+                        shadows: true,
+                    },
+                },
+            );
+            img.save(format!(
+                r"C:\Users\Steven\AppData\Local\Temp\opencode\thumb-{}.png",
+                theme.name
+            ))
+            .unwrap();
+        }
+    }
+}

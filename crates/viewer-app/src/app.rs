@@ -63,8 +63,14 @@ pub struct ViewerApp {
     exposure: f32,
     /// Post-chain contrast (Camera panel slider 0.2..3 → RenderSettings).
     contrast: f32,
-    /// Whether the right settings panel is shown (toolbar toggle).
-    settings_open: bool,
+    /// Active right-panel tab (0 Lighting, 1 Model, 2 View).
+    active_tab: usize,
+    /// GPU-rendered theme thumbnails (one per theme, original-style swatch
+    /// grid). Rendered once at startup; empty when no GPU is available (the
+    /// panel then falls back to colored name swatches).
+    theme_thumbs: Vec<image::RgbaImage>,
+    /// Lazily-created egui textures for the thumbnails (first panel draw).
+    thumb_textures: Vec<egui::TextureHandle>,
     /// Animation playback state (Task 17): the bar writes it, `step_animation`
     /// advances it, `frame_params` feeds `(clip, time)` to the renderer.
     anim: panels::AnimationState,
@@ -99,6 +105,45 @@ impl ViewerApp {
             "eframe must be built with the wgpu renderer for the 3D viewport"
         );
 
+        // Theme thumbnails (UI redesign): nine tiny GPU renders at startup,
+        // one per lighting theme — the original's swatch-grid look. Skipped
+        // when no GPU is available (the panel falls back to swatches).
+        let theme_thumbs = render_state.as_ref().map(|rs| {
+            (0..crate::themes::THEMES.len())
+                .map(|i| {
+                    let (lights, (env, env_i)) =
+                        crate::themes::frame_lights(&crate::themes::THEMES[i], [1.0; 3], 1.0);
+                    viewer_render::preview::render(
+                        &rs.device,
+                        &rs.queue,
+                        96,
+                        viewer_render::FrameParams {
+                            view_proj: viewer_render::preview::camera_view_proj(),
+                            camera_pos: viewer_render::preview::camera_pos(),
+                            turntable_deg: 0.0,
+                            model_scale: 1.0,
+                            lights,
+                            env_color: env,
+                            env_intensity: env_i,
+                            anim: None,
+                            settings: viewer_render::RenderSettings {
+                                clear_color: [0.03, 0.03, 0.035],
+                                wireframe: false,
+                                ground: true,
+                                grid: false,
+                                bloom: false,
+                                exposure: 0.5,
+                                contrast: 1.66,
+                                ground_opacity: 0.4,
+                                shadows: true,
+                            },
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let theme_thumbs = theme_thumbs.unwrap_or_default();
+
         Self {
             render_state,
             renderer: None,
@@ -107,6 +152,9 @@ impl ViewerApp {
             load_rx: None,
             last_size: [0.0, 0.0],
             theme_idx: 0,
+            active_tab: 0,
+            theme_thumbs,
+            thumb_textures: Vec::new(),
             light_mult: [1.0; 3],
             env_mult: 1.0,
             shadows_enabled: true,
@@ -121,7 +169,6 @@ impl ViewerApp {
             model_scale: 1.0,
             exposure: 0.5,
             contrast: 1.66,
-            settings_open: true,
             anim: panels::AnimationState::default(),
             note: None,
         }
@@ -417,12 +464,12 @@ impl eframe::App for ViewerApp {
         // Animation playback (Task 17): advance + keep repainting while on.
         self.advance_animation(ui.ctx());
 
-        // Left toolbar (Task 12): Open / Turntable / Screenshot / Settings.
-        // The Settings toggle gates the right settings panel; both panels run
-        // before the CentralPanel so the viewport shrinks this same frame.
-        let toolbar = panels::toolbar(ui, &mut self.turntable, &mut self.settings_open);
+        // Top strip (UI redesign): Open / Screenshot — the original exposes
+        // file actions through its menu row. Both panels run before the
+        // CentralPanel so the viewport shrinks this same frame.
+        let top = panels::top_strip(ui);
         let mut reset_view = false;
-        if self.settings_open {
+        {
             let (source_name, tri_count, vert_count) = match &self.state {
                 AppState::Ready(scene) => (
                     Some(scene.source_name.as_str()),
@@ -431,52 +478,85 @@ impl eframe::App for ViewerApp {
                 ),
                 _ => (None, 0, 0),
             };
-            panels::settings_panel(
+            let ctx = ui.ctx();
+            if self.thumb_textures.is_empty() && !self.theme_thumbs.is_empty() {
+                self.thumb_textures = self
+                    .theme_thumbs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, img)| {
+                        ctx.load_texture(
+                            format!("theme_thumb_{i}"),
+                            egui::ColorImage::from_rgba_unmultiplied(
+                                [img.width() as usize, img.height() as usize],
+                                img.as_raw(),
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        )
+                    })
+                    .collect();
+            }
+            let thumbs = &self.thumb_textures;
+            panels::right_panel(
                 ui,
-                &mut self.theme_idx,
-                &mut self.light_mult,
-                &mut self.env_mult,
-                &mut self.shadows_enabled,
-                &mut self.wireframe,
-                &mut self.ground,
-                &mut self.grid,
-                &mut self.bloom,
-                panels::ModelSection {
+                panels::PanelState {
+                    theme_idx: &mut self.theme_idx,
+                    light_mult: &mut self.light_mult,
+                    env_mult: &mut self.env_mult,
+                    shadows_enabled: &mut self.shadows_enabled,
+                    wireframe: &mut self.wireframe,
+                    ground: &mut self.ground,
+                    grid: &mut self.grid,
+                    bloom: &mut self.bloom,
                     source_name,
                     tri_count,
                     vert_count,
-                    turntable_speed: &mut self.turntable_speed,
                     rot_offset_deg: &mut self.rot_offset_deg,
                     model_scale: &mut self.model_scale,
-                },
-                panels::CameraSection {
                     fov_y_deg: &mut self.camera.fov_y_deg,
                     exposure: &mut self.exposure,
                     contrast: &mut self.contrast,
                     reset_view: &mut reset_view,
+                    active_tab: &mut self.active_tab,
+                },
+                if thumbs.is_empty() {
+                    panels::ThemeThumbs::None
+                } else {
+                    panels::ThemeThumbs::Textures(&self.thumb_textures)
                 },
             );
         }
 
-        // Bottom animation bar (Task 17): only for a scene WITH animations.
-        // Shown before the CentralPanel so the viewport shrinks this frame.
+        // Bottom playback bar (UI redesign): always visible — turntable
+        // transport on the left, animation transport when clips exist.
         let animations: &[viewer_scene::Animation] = match &self.state {
             AppState::Ready(scene) => &scene.animations,
             _ => &[],
         };
-        if !animations.is_empty() {
-            panels::animation_bar(ui, &mut self.anim, animations);
+        let mut turntable_reset = false;
+        panels::bottom_bar(
+            ui,
+            panels::BottomBarState {
+                turntable: &mut self.turntable,
+                turntable_speed: &mut self.turntable_speed,
+                turntable_reset: &mut turntable_reset,
+                anim: &mut self.anim,
+                animations,
+            },
+        );
+        if turntable_reset {
+            self.turntable_deg = 0.0;
         }
 
-        // Toolbar side effects: the Open request reuses open_path (worker
+        // Top-strip side effects: the Open request reuses open_path (worker
         // thread + Loading state); Screenshot flips the renderer's pending
         // flag with a brief lock (the frame's staging copy is created by the
         // paint callback's prepare phase and collected at the top of the
         // next ui() call). Without a renderer neither can run.
-        if let Some(path) = toolbar.open {
+        if let Some(path) = top.open {
             self.open_path(ui.ctx(), path);
         }
-        if toolbar.screenshot {
+        if top.screenshot {
             renderer
                 .lock()
                 .expect("renderer mutex")
@@ -612,6 +692,9 @@ mod tests {
             load_rx: None,
             last_size: [0.0, 0.0],
             theme_idx: 0,
+            active_tab: 0,
+            theme_thumbs: Vec::new(),
+            thumb_textures: Vec::new(),
             light_mult: [1.0; 3],
             env_mult: 1.0,
             shadows_enabled: true,
@@ -626,7 +709,6 @@ mod tests {
             model_scale: 1.0,
             exposure: 0.5,
             contrast: 1.66,
-            settings_open: true,
             anim: panels::AnimationState::default(),
             note: None,
         }
@@ -718,7 +800,6 @@ mod tests {
         assert!(app.grid);
         assert!(app.bloom);
         assert!(!app.turntable);
-        assert!(app.settings_open);
 
         let s = app.frame_params(1.0).settings;
         assert!(!s.wireframe);
