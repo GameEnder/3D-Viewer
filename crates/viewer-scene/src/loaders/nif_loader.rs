@@ -13,8 +13,72 @@ use glam::{Mat3, Mat4, Vec3, Vec4};
 use crate::error::LoadError;
 use crate::scene::{AlphaMode, Material, Mesh, Scene, Trs};
 
+/// Check the NIF magic string + version and give a precise error for
+/// unsupported versions. The `nif` crate targets version 20.0.0.4
+/// (magic "Gamebryo File Format, Version 20.0.0.4"); the much more common
+/// "NetImmerse File Format" magic (versions up to 10.x) is NOT supported
+/// by the crate, and we say so instead of dumping a binrw backtrace.
+fn check_nif_version(bytes: &[u8]) -> Result<(), LoadError> {
+    let magic = &bytes[..bytes.len().min(28)];
+
+    if magic.starts_with(b"NetImmerse File Format") {
+        // Extract the version string for a helpful message.
+        let version_str = String::from_utf8_lossy(magic)
+            .split("Version ")
+            .nth(1)
+            .unwrap_or("unknown")
+            .to_string();
+        return Err(LoadError::Parse {
+            format: "NIF",
+            detail: format!(
+                "NetImmerse NIF (version {version_str}) is not supported — this viewer \
+                 only supports Gamebryo NIF 20.0.0.4 or later"
+            ),
+        });
+    }
+
+    if !magic.starts_with(b"Gamebryo File Format") {
+        return Err(LoadError::Parse {
+            format: "NIF",
+            detail: "not a valid NIF file (bad magic)".into(),
+        });
+    }
+
+    // Check the specific version after the magic (bytes 28..32 = version u32).
+    if let Some(version_bytes) = bytes.get(28..32) {
+        let version = u32::from_le_bytes([
+            version_bytes[0],
+            version_bytes[1],
+            version_bytes[2],
+            version_bytes[3],
+        ]);
+        // The crate asserts version == 0x14000004 (20.0.0.4).
+        if version != 0x1400_0004 {
+            let v1 = (version >> 24) & 0xFF;
+            let v2 = (version >> 16) & 0xFF;
+            let v3 = (version >> 8) & 0xFF;
+            let v4 = version & 0xFF;
+            return Err(LoadError::Parse {
+                format: "NIF",
+                detail: format!(
+                    "NIF version {v1}.{v2}.{v3}.{v4} is not supported — \
+                     this viewer only supports version 20.0.0.4"
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 pub fn load(path: &Path) -> Result<Scene, LoadError> {
     let bytes = std::fs::read(path)?;
+
+    // Detect the NIF version from the magic string BEFORE calling the parser,
+    // so we can give a precise error message for the common mismatch
+    // (older NetImmerse files vs the Gamebryo 20.0 the crate targets).
+    check_nif_version(&bytes)?;
+
     let mut cursor = std::io::Cursor::new(bytes);
     let nif = nif::Nif::parse(&mut cursor).map_err(|e| LoadError::Parse {
         format: "NIF",
