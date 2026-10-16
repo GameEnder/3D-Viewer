@@ -85,6 +85,7 @@ pub struct Node {
     pub meshes: Vec<usize>, // one draw per entry; glTF primitives map here
 }
 
+#[derive(Debug)]
 pub struct Scene {
     pub root: usize,
     pub nodes: Vec<Node>, // invariant: parent index < child index

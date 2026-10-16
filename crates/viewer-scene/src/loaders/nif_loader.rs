@@ -1,268 +1,286 @@
-//! NIF (NetImmerse/Gamebryo) loader via the `nif` crate (targets version 20.0.0.4).
+//! NIF (NetImmerse/Gamebryo) loader via ByroRedux's parser (all versions:
+//! Morrowind 4.x → Oblivion → FO3/FNV → Skyrim → FO4 → Starfield).
 //!
-//! Extracts mesh geometry (NiTriShape + NiTriStrips, both expanded to triangle
-//! lists), UVs, normals, and diffuse color from NiMaterialProperty. Node
-//! hierarchy transforms (translation + rotation + scale) are composed from
-//! the root and baked into the vertex positions. Skinned meshes render in
-//! bind pose. Texture files are not loaded (diffuse color only).
+//! Extracts mesh geometry (NiTriShape/NiTriStrips lists, FO4+ BSTriShape),
+//! UVs, normals, and node-hierarchy transforms (translation + rotation +
+//! scale), baked into world-space vertex positions. Bethesda NIFs are Z-up;
+//! the root transform carries a -90° X rotation so models appear upright in
+//! the viewer's Y-up space. Skinned meshes render in bind pose.
 
 use std::path::Path;
 
 use glam::{Mat3, Mat4, Vec3, Vec4};
 
 use crate::error::LoadError;
-use crate::scene::{AlphaMode, Material, Mesh, Scene, Trs};
+use crate::scene::{Material, Mesh, Scene, Trs};
 
-/// Check the NIF magic string + version and give a precise error for
-/// unsupported versions. The `nif` crate targets version 20.0.0.4
-/// (magic "Gamebryo File Format, Version 20.0.0.4"); the much more common
-/// "NetImmerse File Format" magic (versions up to 10.x) is NOT supported
-/// by the crate, and we say so instead of dumping a binrw backtrace.
-fn check_nif_version(bytes: &[u8]) -> Result<(), LoadError> {
-    let magic = &bytes[..bytes.len().min(28)];
-
-    if magic.starts_with(b"NetImmerse File Format") {
-        // Extract the version string for a helpful message.
-        let version_str = String::from_utf8_lossy(magic)
-            .split("Version ")
-            .nth(1)
-            .unwrap_or("unknown")
-            .to_string();
-        return Err(LoadError::Parse {
-            format: "NIF",
-            detail: format!(
-                "NetImmerse NIF (version {version_str}) is not supported — this viewer \
-                 only supports Gamebryo NIF 20.0.0.4 or later"
-            ),
-        });
-    }
-
-    if !magic.starts_with(b"Gamebryo File Format") {
-        return Err(LoadError::Parse {
-            format: "NIF",
-            detail: "not a valid NIF file (bad magic)".into(),
-        });
-    }
-
-    // Check the specific version after the magic (bytes 28..32 = version u32).
-    if let Some(version_bytes) = bytes.get(28..32) {
-        let version = u32::from_le_bytes([
-            version_bytes[0],
-            version_bytes[1],
-            version_bytes[2],
-            version_bytes[3],
-        ]);
-        // The crate asserts version == 0x14000004 (20.0.0.4).
-        if version != 0x1400_0004 {
-            let v1 = (version >> 24) & 0xFF;
-            let v2 = (version >> 16) & 0xFF;
-            let v3 = (version >> 8) & 0xFF;
-            let v4 = version & 0xFF;
-            return Err(LoadError::Parse {
-                format: "NIF",
-                detail: format!(
-                    "NIF version {v1}.{v2}.{v3}.{v4} is not supported — \
-                     this viewer only supports version 20.0.0.4"
-                ),
-            });
-        }
-    }
-
-    Ok(())
-}
+use byroredux_nif::blocks::node::NiNode;
+use byroredux_nif::blocks::strip::destrip;
+use byroredux_nif::blocks::tri_shape::{BsTriShape, NiTriShape, NiTriShapeData, NiTriStripsData};
+use byroredux_nif::scene::NifScene;
+use byroredux_nif::types::NiTransform;
 
 pub fn load(path: &Path) -> Result<Scene, LoadError> {
-    let bytes = std::fs::read(path)?;
-
-    // Detect the NIF version from the magic string BEFORE calling the parser,
-    // so we can give a precise error message for the common mismatch
-    // (older NetImmerse files vs the Gamebryo 20.0 the crate targets).
-    check_nif_version(&bytes)?;
-
-    let mut cursor = std::io::Cursor::new(bytes);
-    let nif = nif::Nif::parse(&mut cursor).map_err(|e| LoadError::Parse {
-        format: "NIF",
-        detail: e.to_string(),
-    })?;
-
+    let bytes = std::fs::read(path).map_err(LoadError::Io)?;
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+
+    let nif = byroredux_nif::parse_nif(&bytes).map_err(|e| LoadError::Parse {
+        format: "NIF",
+        detail: format!("{e}"),
+    })?;
+
     let mut scene = Scene::new(name);
     scene.materials.push(Material::default_pbr());
 
     let mut mesh_count = 0usize;
     let mut warnings = Vec::new();
 
-    // Walk the block tree from roots, accumulating world transforms.
-    let root_indices: Vec<usize> = nif.roots().map(|(i, _)| i).collect();
-    for root_idx in root_indices {
-        collect_shapes(
+    if nif.truncated {
+        warnings.push(format!(
+            "file was truncated during parse ({} blocks dropped); \
+             geometry may be incomplete",
+            nif.dropped_block_count
+        ));
+    }
+
+    // Z-up (Gamebryo) → Y-up (viewer): rotate -90° about X.
+    let root_fix = Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+
+    if let Some(root_idx) = nif.root_index {
+        walk(
             &nif,
             root_idx,
-            Mat4::IDENTITY,
+            root_fix,
             &mut scene,
             &mut mesh_count,
             &mut warnings,
         );
+    } else {
+        // No root index: scan every block for geometry as a fallback.
+        for i in 0..nif.len() {
+            walk(
+                &nif,
+                i,
+                root_fix,
+                &mut scene,
+                &mut mesh_count,
+                &mut warnings,
+            );
+        }
     }
 
     if mesh_count == 0 {
+        let mut detail = "no mesh geometry found".to_string();
+        if !warnings.is_empty() {
+            detail = format!("no meshes loaded: {}", warnings.join("; "));
+        }
         return Err(LoadError::Parse {
             format: "NIF",
-            detail: if warnings.is_empty() {
-                "no mesh geometry found".into()
-            } else {
-                format!("no meshes loaded: {}", warnings.join("; "))
-            },
+            detail,
         });
     }
     scene.warnings = warnings;
     Ok(scene)
 }
 
-/// Recursively walk the block tree, extracting geometry with accumulated world transforms.
-fn collect_shapes(
-    nif: &nif::Nif,
+/// Recursively walk the block tree from `block_idx`, extracting geometry.
+#[allow(clippy::too_many_arguments)]
+fn walk(
+    nif: &NifScene,
     block_idx: usize,
     parent_world: Mat4,
     scene: &mut Scene,
     mesh_count: &mut usize,
     warnings: &mut Vec<String>,
 ) {
-    let Some(block) = nif.blocks.get(block_idx) else {
-        return;
-    };
-
-    // Compute this block's world transform = parent_world * local_transform.
-    let local = local_transform(block);
-    let world = parent_world * local;
-
-    // Skip hidden shapes.
-    if let Some(av) = block.av_object()
-        && av.is_hidden()
-    {
-        return;
+    // NiTriShape (and NiTriStrips, which shares its serialization):
+    // a mesh whose geometry lives in a separate data block.
+    if let Some(shape) = nif.get_as::<NiTriShape>(block_idx) {
+        let world = parent_world * byro_transform(&shape.av.transform);
+        let Some(data_idx) = shape.data_ref.index() else {
+            return;
+        };
+        let added = if let Some(data) = nif.get_as::<NiTriShapeData>(data_idx) {
+            push_mesh(
+                &shape_name(shape),
+                tri_list_mesh(data, world),
+                scene,
+                warnings,
+            )
+        } else if let Some(data) = nif.get_as::<NiTriStripsData>(data_idx) {
+            push_mesh(&shape_name(shape), strip_mesh(data, world), scene, warnings)
+        } else {
+            false
+        };
+        *mesh_count += added as usize;
     }
-
-    // Extract geometry from NiTriShape / NiTriStrips.
-    if block.geometry().is_some()
-        && let Some((data, triangles)) = block.triangles(&nif.blocks)
-    {
-        match build_mesh(nif, block, data, &triangles, world) {
-            Ok((mesh, material)) => {
-                let mat_idx = if let Some(m) = material {
-                    scene.materials.push(m);
-                    scene.materials.len() - 1
-                } else {
-                    0
-                };
-                let mut m = mesh;
-                m.material = mat_idx;
-                let node_name = block
-                    .object_net()
-                    .map(|o| o.name.to_string_lossy().into_owned());
-                let node = scene.add_node(scene.root, Trs::identity(), node_name);
-                let mi = scene.add_mesh(m);
-                scene.nodes[node].meshes.push(mi);
-                *mesh_count += 1;
-            }
-            Err(e) => {
-                let shape_name = block
-                    .object_net()
-                    .map(|o| o.name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                warnings.push(format!("shape '{shape_name}': {e}"));
-            }
-        }
+    // BsTriShape (FO4/Skyrim SE+): geometry stored inline on the block.
+    else if let Some(shape) = nif.get_as::<BsTriShape>(block_idx) {
+        let world = parent_world * byro_transform(&shape.av.transform);
+        let added = push_mesh(
+            &shape_name_bs(shape),
+            bs_tri_mesh(shape, world),
+            scene,
+            warnings,
+        );
+        *mesh_count += added as usize;
     }
-
-    // Recurse into children.
-    if let Some(child_refs) = block.child_refs() {
-        for child_ref in child_refs {
+    // NiNode: a group node with children.
+    else if let Some(node) = nif.get_as::<NiNode>(block_idx) {
+        let world = parent_world * byro_transform(&node.av.transform);
+        for child_ref in &node.children {
             if let Some(child_idx) = child_ref.index() {
-                collect_shapes(nif, child_idx, world, scene, mesh_count, warnings);
+                walk(nif, child_idx, world, scene, mesh_count, warnings);
             }
         }
     }
 }
 
-/// Build the local transform matrix from a block's NiAvObject fields.
-/// The NIF rotation is a row-major 3×3 matrix stored as a flat [f32; 9]:
-/// [m11 m12 m13, m21 m22 m23, m31 m32 m33].
-fn local_transform(block: &nif::blocks::Block) -> Mat4 {
-    let Some(av) = block.av_object() else {
-        return Mat4::IDENTITY;
-    };
-    let t = Vec3::new(av.translation.x, av.translation.y, av.translation.z);
-    let rm = &av.rotation.row_major;
-    // glam Mat3 columns from row-major NIF data:
-    // col_x = (m11, m21, m31) = elements [0], [3], [6]
-    // col_y = (m12, m22, m32) = elements [1], [4], [7]
-    // col_z = (m13, m23, m33) = elements [2], [5], [8]
-    let rot = Mat3::from_cols(
-        Vec3::new(rm[0], rm[3], rm[6]),
-        Vec3::new(rm[1], rm[4], rm[7]),
-        Vec3::new(rm[2], rm[5], rm[8]),
-    );
-    Mat4::from_translation(t) * Mat4::from_mat3(rot) * Mat4::from_scale(Vec3::splat(av.scale))
+/// Add a mesh (already world-transformed) to the scene under the root node.
+/// Returns true when the mesh was accepted.
+fn push_mesh(
+    node_name: &str,
+    mesh: Result<Mesh, String>,
+    scene: &mut Scene,
+    warnings: &mut Vec<String>,
+) -> bool {
+    match mesh {
+        Ok(mesh) => {
+            let node = scene.add_node(scene.root, Trs::identity(), Some(node_name.to_string()));
+            let mi = scene.add_mesh(mesh);
+            scene.nodes[node].meshes.push(mi);
+            true
+        }
+        Err(e) => {
+            if !node_name.is_empty() {
+                warnings.push(format!("{node_name}: {e}"));
+            } else {
+                warnings.push(e);
+            }
+            false
+        }
+    }
 }
 
-/// Extract geometry data from NiGeometryData + triangles, applying the world transform.
-fn build_mesh(
-    nif: &nif::Nif,
-    shape_block: &nif::blocks::Block,
-    data: &nif::blocks::NiGeometryData,
-    triangles: &[nif::common::Triangle],
-    world: Mat4,
-) -> Result<(Mesh, Option<Material>), String> {
-    let positions_raw = data.vertices.as_ref().ok_or("no vertices")?;
-    if positions_raw.is_empty() {
+fn shape_name(shape: &NiTriShape) -> String {
+    shape
+        .av
+        .net
+        .name
+        .as_ref()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "NiTriShape".into())
+}
+
+fn shape_name_bs(shape: &BsTriShape) -> String {
+    shape
+        .av
+        .net
+        .name
+        .as_ref()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "BSTriShape".into())
+}
+
+/// NiTriShapeData: triangle-list geometry.
+fn tri_list_mesh(data: &NiTriShapeData, world: Mat4) -> Result<Mesh, String> {
+    if data.vertices.is_empty() {
         return Err("mesh has no vertices".into());
     }
-    if triangles.is_empty() {
+    if data.triangles.is_empty() {
         return Err("mesh has no triangles".into());
     }
 
-    // Positions: apply the world transform.
-    let positions: Vec<[f32; 3]> = positions_raw
+    let positions = transform_positions(&data.vertices, world);
+    let normals = transform_normals(&data.normals, world);
+    let uvs = data.uv_sets.first().cloned().unwrap_or_default();
+    let indices: Vec<u32> = data
+        .triangles
+        .iter()
+        .flat_map(|t| [u32::from(t[0]), u32::from(t[1]), u32::from(t[2])])
+        .collect();
+    finish_mesh(positions, normals, uvs, indices)
+}
+
+/// NiTriStripsData: triangle strips (Morrowind/Oblivion era).
+fn strip_mesh(data: &NiTriStripsData, world: Mat4) -> Result<Mesh, String> {
+    if data.vertices.is_empty() {
+        return Err("mesh has no vertices".into());
+    }
+    if data.strips.is_empty() {
+        return Err("mesh has no triangle strips".into());
+    }
+
+    let positions = transform_positions(&data.vertices, world);
+    let normals = transform_normals(&data.normals, world);
+    let uvs = data.uv_sets.first().cloned().unwrap_or_default();
+
+    // Strip → triangle list (OpenGL convention; degenerates skipped).
+    let indices: Vec<u32> = data
+        .strips
+        .iter()
+        .flat_map(|strip| {
+            destrip(strip).flat_map(|[a, b, c]| [u32::from(a), u32::from(b), u32::from(c)])
+        })
+        .collect();
+    if indices.is_empty() {
+        return Err("all strips degenerate".into());
+    }
+    finish_mesh(positions, normals, uvs, indices)
+}
+
+/// BsTriShape: FO4+ inline geometry.
+fn bs_tri_mesh(shape: &BsTriShape, world: Mat4) -> Result<Mesh, String> {
+    if shape.vertices.is_empty() {
+        return Err("mesh has no vertices".into());
+    }
+    if shape.triangles.is_empty() {
+        return Err("mesh has no triangles".into());
+    }
+
+    let positions = transform_positions(&shape.vertices, world);
+    let normals = transform_normals(&shape.normals, world);
+    let uvs = shape.uvs.clone();
+    let indices: Vec<u32> = shape
+        .triangles
+        .iter()
+        .flat_map(|t| [u32::from(t[0]), u32::from(t[1]), u32::from(t[2])])
+        .collect();
+    finish_mesh(positions, normals, uvs, indices)
+}
+
+fn transform_positions(verts: &[byroredux_nif::types::NiPoint3], world: Mat4) -> Vec<[f32; 3]> {
+    verts
         .iter()
         .map(|v| {
             let p = world * Vec4::new(v.x, v.y, v.z, 1.0);
             [p.x, p.y, p.z]
         })
-        .collect();
+        .collect()
+}
 
-    // Normals: apply the rotation part and renormalize.
-    let normals: Vec<[f32; 3]> = data
-        .normals
-        .as_ref()
-        .map(|ns| {
-            ns.iter()
-                .map(|n| {
-                    let dir = world * Vec4::new(n.x, n.y, n.z, 0.0);
-                    let len = dir.length().max(1e-6);
-                    [dir.x / len, dir.y / len, dir.z / len]
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // UVs: first UV set if present.
-    let uvs: Vec<[f32; 2]> = data
-        .uv_sets
-        .first()
-        .map(|s| s.uvs.iter().map(|uv| [uv.u, uv.v]).collect())
-        .unwrap_or_default();
-
-    // Triangle indices (NIF Triangle fields are a, b, c — u16).
-    let indices: Vec<u32> = triangles
+fn transform_normals(norms: &[byroredux_nif::types::NiPoint3], world: Mat4) -> Vec<[f32; 3]> {
+    // Mirror the position path; empty input means "compute flat normals later"
+    // and is preserved as empty so the renderer falls back.
+    norms
         .iter()
-        .flat_map(|t| [t.a as u32, t.b as u32, t.c as u32])
-        .collect();
+        .map(|n| {
+            let d = world * Vec4::new(n.x, n.y, n.z, 0.0);
+            let len = d.length().max(1e-6);
+            [d.x / len, d.y / len, d.z / len]
+        })
+        .collect()
+}
 
-    // Bounds-check indices.
+fn finish_mesh(
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+) -> Result<Mesh, String> {
     let vertex_count = positions.len();
     for &i in &indices {
         if (i as usize) >= vertex_count {
@@ -271,41 +289,30 @@ fn build_mesh(
             ));
         }
     }
-
-    let material = load_material(nif, shape_block);
-
-    Ok((
-        Mesh {
-            positions,
-            normals,
-            uvs,
-            indices,
-            material: 0, // caller sets this
-        },
-        material,
-    ))
+    let normals = if normals.len() == vertex_count {
+        normals
+    } else {
+        vec![[0.0, 0.0, 0.0]; vertex_count] // renderer recomputes when zeroed
+    };
+    Ok(Mesh {
+        positions,
+        normals,
+        uvs,
+        indices,
+        material: 0,
+    })
 }
 
-/// Walk the shape's property_refs to find a NiMaterialProperty and extract
-/// the diffuse color + alpha.
-fn load_material(nif: &nif::Nif, shape_block: &nif::blocks::Block) -> Option<Material> {
-    let properties = shape_block.properties(&nif.blocks)?;
-    for (_, prop) in properties {
-        if let nif::blocks::Block::NiMaterialProperty(mat) = prop {
-            let diffuse = mat.color_diffuse;
-            let base_color = [diffuse.r, diffuse.g, diffuse.b, mat.alpha];
-            let alpha_mode = if mat.alpha < 1.0 {
-                AlphaMode::Blend
-            } else {
-                AlphaMode::Opaque
-            };
-            return Some(Material {
-                base_color,
-                roughness: (1.0 - mat.glossiness / 1000.0).clamp(0.05, 1.0),
-                alpha_mode,
-                ..Material::default_pbr()
-            });
-        }
-    }
-    None
+/// ByroRedux NiTransform (row-major rotation + translation + uniform scale)
+/// → glam Mat4 (column-major).
+fn byro_transform(t: &NiTransform) -> Mat4 {
+    let r = &t.rotation.rows;
+    let rot = Mat3::from_cols(
+        Vec3::new(r[0][0], r[1][0], r[2][0]),
+        Vec3::new(r[0][1], r[1][1], r[2][1]),
+        Vec3::new(r[0][2], r[1][2], r[2][2]),
+    );
+    Mat4::from_translation(Vec3::new(t.translation.x, t.translation.y, t.translation.z))
+        * Mat4::from_mat3(rot)
+        * Mat4::from_scale(Vec3::splat(t.scale))
 }

@@ -217,8 +217,7 @@ fn fbx_loader_is_wired_not_unsupported() {
     // an Io error (file-not-found), not UnsupportedFormat — proving the
     // dispatch actually reaches the FBX loader.
     let err = viewer_scene::load(std::path::Path::new("model.fbx"))
-        .err()
-        .expect("nonexistent FBX must error");
+        .expect_err("nonexistent FBX must error");
     assert!(
         !matches!(err, viewer_scene::LoadError::UnsupportedFormat(_)),
         "FBX must no longer be rejected as unsupported: got {err:?}"
@@ -350,9 +349,7 @@ fn rejects_primitive_index_out_of_range() {
     // upload (m.positions[vi] in gpu_scene::upload). Must come back as a
     // Parse error naming the offending index and the vertex count.
     let path = write_temp("cube_oob_index.glb", &build_oob_index_glb());
-    let err = viewer_scene::load(&path)
-        .err()
-        .expect("out-of-range primitive index must be rejected");
+    let err = viewer_scene::load(&path).expect_err("out-of-range primitive index must be rejected");
     assert!(
         matches!(err, viewer_scene::LoadError::Parse { .. }),
         "wrong error kind: {err}"
@@ -375,8 +372,7 @@ fn rejects_animation_output_count_mismatch() {
     // (anim_eval indexes k.values[i]/[j] by times segment indices).
     let path = write_temp("anim_count_mismatch.glb", &build_anim_glb("LINEAR", 1));
     let err = viewer_scene::load(&path)
-        .err()
-        .expect("sampler output/input count mismatch must be rejected");
+        .expect_err("sampler output/input count mismatch must be rejected");
     assert!(
         matches!(err, viewer_scene::LoadError::Parse { .. }),
         "wrong error kind: {err}"
@@ -402,8 +398,7 @@ fn rejects_cubicspline_output_not_packed_in_threes() {
         &build_anim_glb("CUBICSPLINE", 2),
     );
     let err = viewer_scene::load(&path)
-        .err()
-        .expect("CUBICSPLINE output without 3-per-key packing must be rejected");
+        .expect_err("CUBICSPLINE output without 3-per-key packing must be rejected");
     assert!(
         matches!(err, viewer_scene::LoadError::Parse { .. }),
         "wrong error kind: {err}"
