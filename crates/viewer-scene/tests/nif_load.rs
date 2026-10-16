@@ -172,6 +172,102 @@ fn build_empty_nif() -> Vec<u8> {
     nif
 }
 
+/// Build a minimal Morrowind NIF (NetImmerse v4.0.0.2): NiNode root ->
+/// NiTriShape -> NiTriStripsData (4 vertices, one strip [0,1,2,3] = 2 tris).
+///
+/// Pre-Gamebryo serialization: no endian/user_version/tables in the header,
+/// inline block type names, inline names, single extra-data ref, u16 flags,
+/// velocity field, 32-bit bools, explicit has_uv, no has_strips/has_triangles.
+fn build_morrowind_strips_nif() -> Vec<u8> {
+    let mut nif = Vec::new();
+
+    // Header: magic line + version. No endian byte (v < 20.0.0.4),
+    // no user_version (v < 10.0.1.8), no block type table (v < 10.0.1.0),
+    // no block sizes, no string table, no groups.
+    nif.extend_from_slice(b"NetImmerse File Format, Version 4.0.0.2\n");
+    w32(&mut nif, 0x0400_0002);
+    w32(&mut nif, 3); // num_blocks
+
+    // Block 0: NiNode root (type name is inline, sized)
+    wsstr(&mut nif, "NiNode");
+    wsstr(&mut nif, "Scene Root"); // name (inline string)
+    w32(&mut nif, 0xFFFF_FFFF); // extra_data_ref: single ref pre-Gamebryo
+    w32(&mut nif, 0xFFFF_FFFF); // controller_ref
+    w16(&mut nif, 0x000E); // flags: u16 (bsver 0 <= 26)
+    wf32(&mut nif, 0.0); // translation
+    wf32(&mut nif, 0.0);
+    wf32(&mut nif, 0.0);
+    for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+        wf32(&mut nif, v); // rotation (identity)
+    }
+    wf32(&mut nif, 1.0); // scale
+    wf32(&mut nif, 0.0); // velocity (v <= 4.2.2.0)
+    wf32(&mut nif, 0.0);
+    wf32(&mut nif, 0.0);
+    w32(&mut nif, 0); // num_properties (bsver <= 34)
+    w32(&mut nif, 0); // has_bounding_volume: 32-bit bool (v <= 4.0.0.2)
+    w32(&mut nif, 1); // num_children
+    w32(&mut nif, 1); // child ref -> block 1 (NiTriShape)
+    w32(&mut nif, 0); // num_effects
+
+    // Block 1: NiTriShape
+    wsstr(&mut nif, "NiTriShape");
+    wsstr(&mut nif, "Quad"); // name
+    w32(&mut nif, 0xFFFF_FFFF); // extra_data_ref
+    w32(&mut nif, 0xFFFF_FFFF); // controller_ref
+    w16(&mut nif, 0x000F); // flags
+    wf32(&mut nif, 0.0); // translation
+    wf32(&mut nif, 0.0);
+    wf32(&mut nif, 0.0);
+    for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+        wf32(&mut nif, v); // rotation (identity)
+    }
+    wf32(&mut nif, 1.0); // scale
+    wf32(&mut nif, 0.0); // velocity
+    wf32(&mut nif, 0.0);
+    wf32(&mut nif, 0.0);
+    w32(&mut nif, 0); // num_properties
+    w32(&mut nif, 0); // has_bounding_volume
+    w32(&mut nif, 2); // data_ref -> block 2 (NiTriStripsData)
+    w32(&mut nif, 0xFFFF_FFFF); // skin_instance_ref (no material data < 10.0.1.0)
+
+    // Block 2: NiTriStripsData
+    wsstr(&mut nif, "NiTriStripsData");
+    w16(&mut nif, 4); // num_vertices
+    w32(&mut nif, 1); // has_vertices: 32-bit bool
+    for v in [
+        0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0,
+    ] {
+        wf32(&mut nif, v); // vertices
+    }
+    w32(&mut nif, 1); // has_normals: 32-bit bool
+    for _ in 0..4 {
+        wf32(&mut nif, 0.0); // normals: +Z in NIF space
+        wf32(&mut nif, 0.0);
+        wf32(&mut nif, 1.0);
+    }
+    wf32(&mut nif, 0.5); // center
+    wf32(&mut nif, 0.5);
+    wf32(&mut nif, 0.0);
+    wf32(&mut nif, 1.0); // radius
+    w32(&mut nif, 0); // has_vertex_colors: 32-bit bool
+    w16(&mut nif, 1); // num_uv_sets: separate u16 field (v < 10.0.1.0)
+    w32(&mut nif, 1); // has_uv: explicit 32-bit bool (v <= 4.0.0.2)
+    for uv in [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]] {
+        wf32(&mut nif, uv[0]);
+        wf32(&mut nif, uv[1]);
+    }
+    w16(&mut nif, 2); // num_triangles
+    w16(&mut nif, 1); // num_strips
+    w16(&mut nif, 4); // strip_lengths[0]
+    // has_strips bool absent (v < 10.0.1.3)
+    for i in 0u16..4 {
+        w16(&mut nif, i); // strip [0, 1, 2, 3]
+    }
+
+    nif
+}
+
 fn temp_path(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("viewer-nif-tests");
     let _ = std::fs::create_dir_all(&dir);
@@ -218,6 +314,50 @@ fn loads_skyrim_nif_with_transform_and_geometry() {
 
     assert_eq!(scene.tri_count, 1);
     assert_eq!(scene.vert_count, 3);
+}
+
+#[test]
+fn loads_morrowind_strips_nif() {
+    let path = temp_path("morrowind_strips.nif");
+    std::fs::write(&path, build_morrowind_strips_nif()).unwrap();
+    let scene = viewer_scene::load(&path).unwrap();
+
+    assert_eq!(scene.meshes.len(), 1, "one mesh expected");
+    let mesh = &scene.meshes[0];
+
+    // Strip [0,1,2,3] destrips to two triangles (odd triangle swaps
+    // the last two indices per the OpenGL strip convention).
+    assert_eq!(mesh.indices, vec![0, 1, 2, 1, 3, 2]);
+
+    // Z-up -> Y-up: NIF (x,y,z) maps to viewer (x,z,-y).
+    let expected = [
+        [0.0f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [1.0, 0.0, -1.0],
+    ];
+    for (got, want) in mesh.positions.iter().zip(expected) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-5, "position {got:?} != {want:?}");
+        }
+    }
+
+    // NIF +Z normal maps to viewer +Y.
+    for n in &mesh.normals {
+        assert!(
+            (n[0] - 0.0).abs() < 1e-5 && (n[1] - 1.0).abs() < 1e-5 && (n[2] - 0.0).abs() < 1e-5,
+            "normal {n:?} should be +Y after the Z-up fix"
+        );
+    }
+
+    assert_eq!(mesh.uvs.len(), 4);
+    assert_eq!(scene.tri_count, 2);
+    assert_eq!(scene.vert_count, 4);
+    assert!(
+        scene.warnings.is_empty(),
+        "Morrowind fixture should parse cleanly: {:?}",
+        scene.warnings
+    );
 }
 
 #[test]
