@@ -19,7 +19,7 @@ fresh clone resolves a compatible toolchain automatically.
 
 ## Supported formats
 
-GLB, GLTF, OBJ, STL, PLY, 3MF, and binary FBX (7.4/7.5, via
+GLB, GLTF, OBJ, STL, PLY, 3MF, binary FBX, and NIF (Gamebryo 20.0) (7.4/7.5, via
 [`fbxcel-dom`](https://github.com/lo48576/fbxcel-dom)). FBX ASCII format and
 FBX ≤6.0 are rejected with a friendly error message.
 

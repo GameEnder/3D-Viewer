@@ -12,6 +12,7 @@ egui-wgpu = "0.36"
 fbxcel-dom = "0.0.10"
 glam = "0.30"
 gltf = "1"
+nif = { git = "https://github.com/amPerl/nif", features = ["glam"] }
 tobj = "4"
 image = "0.25"
 zip = { version = "2", default-features = false, features = ["deflate"] }

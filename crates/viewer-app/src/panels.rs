@@ -120,7 +120,7 @@ pub fn menu_bar(ui: &mut egui::Ui) -> MenuBarOutcome {
                         out.open = rfd::FileDialog::new()
                             .add_filter(
                                 "3D models",
-                                &["glb", "gltf", "obj", "stl", "ply", "3mf", "fbx"],
+                                &["glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif"],
                             )
                             .pick_file();
                         ui.close();
@@ -193,7 +193,7 @@ pub fn about_dialog(ctx: &egui::Context, open: &mut bool) {
             ui.heading("3D Viewer");
             ui.label("A Rust clone of Microsoft's 3D Viewer");
             ui.add_space(4.0);
-            ui.label("Supports: GLB, GLTF, OBJ, STL, PLY, 3MF, FBX");
+            ui.label("Supports: GLB, GLTF, OBJ, STL, PLY, 3MF, FBX, NIF");
             ui.add_space(8.0);
             if ui.button("OK").clicked() {
                 *open = false;
