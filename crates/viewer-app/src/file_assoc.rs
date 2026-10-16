@@ -33,7 +33,10 @@ pub mod imp {
             .unwrap_or_default()
     }
 
-    /// Write the ProgID key: description, icon, and open command.
+    /// Write the ProgID key: description, icon, friendly app name, and the
+    /// open command. The `FriendlyAppName` is what Windows shows in Settings
+    /// → Default Apps and in file Properties → "Opens with"; without it
+    /// Windows falls back to the exe filename (viewer.exe).
     fn write_progid(classes: &RegKey) -> Result<(), String> {
         let (progid, _) = classes
             .create_subkey(PROG_ID)
@@ -44,12 +47,20 @@ pub mod imp {
         progid
             .set_value("DefaultIcon", &format!("{},0", exe_path()))
             .map_err(|e| format!("set icon: {e}"))?;
+        progid
+            .set_value("FriendlyAppName", &"3D Viewer")
+            .map_err(|e| format!("set friendly name: {e}"))?;
 
-        let (shell, _) = progid
+        let (open, _) = progid
+            .create_subkey(r"shell\open")
+            .map_err(|e| format!("create open key: {e}"))?;
+        open.set_value("", &"&Open with 3D Viewer")
+            .map_err(|e| format!("set open label: {e}"))?;
+
+        let (cmd, _) = progid
             .create_subkey(r"shell\open\command")
             .map_err(|e| format!("create open command key: {e}"))?;
-        shell
-            .set_value("", &format!("\"{}\" \"%1\"", exe_path()))
+        cmd.set_value("", &format!("\"{}\" \"%1\"", exe_path()))
             .map_err(|e| format!("set open command: {e}"))?;
         Ok(())
     }
