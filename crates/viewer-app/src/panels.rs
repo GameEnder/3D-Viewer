@@ -208,7 +208,7 @@ pub fn about_dialog(ctx: &egui::Context, open: &mut bool) {
 pub struct PreferencesState {
     pub open: bool,
     /// Result message from the last register/unregister action.
-    pub message: Option<Result<usize, String>>,
+    pub message: Option<Result<String, String>>,
 }
 
 pub fn preferences_dialog(ctx: &egui::Context, s: &mut PreferencesState) {
@@ -263,7 +263,7 @@ pub fn preferences_dialog(ctx: &egui::Context, s: &mut PreferencesState) {
                             Some(h) if protected => {
                                 ui.colored_label(
                                     ui.style().visuals.warn_fg_color,
-                                    format!("{h} — protected by Windows, switch below"),
+                                    format!("{h} — Windows-protected, Register all can retake it"),
                                 );
                             }
                             Some(h) => {
@@ -281,11 +281,8 @@ pub fn preferences_dialog(ctx: &egui::Context, s: &mut PreferencesState) {
                 // Action result message.
                 if let Some(msg) = &s.message {
                     match msg {
-                        Ok(n) => {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(100, 200, 100),
-                                format!("Done — {n} extensions updated."),
-                            );
+                        Ok(text) => {
+                            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), text);
                         }
                         Err(e) => {
                             ui.colored_label(
@@ -308,17 +305,9 @@ pub fn preferences_dialog(ctx: &egui::Context, s: &mut PreferencesState) {
                 });
                 ui.add_space(4.0);
                 ui.weak(
-                    "Windows protects defaults you previously chose (Settings or \
-                     'Open with → Always'). Registering adds 3D Viewer to the \
-                     'Open with' menu and makes it the default where Windows \
-                     allows; protected types must be switched by hand once.",
+                    "Registering writes Windows-validated defaults, including for \
+                     types normally protected by Windows. No admin rights required.",
                 );
-                ui.add_space(4.0);
-                if ui.button("Open Windows Default Apps settings…").clicked() {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg("ms-settings:defaultapps")
-                        .spawn();
-                }
             }
 
             #[cfg(not(windows))]

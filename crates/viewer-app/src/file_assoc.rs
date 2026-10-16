@@ -71,53 +71,57 @@ pub mod imp {
         Ok(())
     }
 
-    /// Register all extensions to open with our ProgID.
-    /// Returns the number of extensions successfully registered.
-    pub fn register() -> Result<usize, String> {
-        clear_userchoice_overrides();
-        let count = write_all_extensions()?;
-        notify_explorer();
-        Ok(count)
-    }
+    /// Register all extensions: Classes entries (ProgID, `.ext` defaults,
+    /// OpenWithProgids) plus Windows-validated UserChoice assignments —
+    /// the UserChoice hash write is what actually makes 3D Viewer the
+    /// default, including for types Windows normally protects.
+    pub fn register() -> Result<String, String> {
+        write_all_extensions().map_err(|e| e.to_string())?;
 
-    /// Remove all registrations (ProggID + extension references).
-    /// Returns the number of extensions successfully unregistered.
-    pub fn unregister() -> Result<usize, String> {
-        let count = clear_all_extensions()?;
-        notify_explorer();
-        Ok(count)
-    }
-
-    /// Delete the UserChoice override for each extension. Windows writes
-    /// UserChoice when the user picks a default app in Settings; it takes
-    /// priority over `Classes\.ext\Default`, so we must clear it to become
-    /// the default handler.
-    ///
-    /// Prefer deleting the ENTIRE UserChoice key: a valueless leftover key
-    /// is worse than none. Windows 11 treats it as an invalid user choice
-    /// and shows the "How do you want to open this file?" picker on every
-    /// open — never falling back to the per-user Classes default. Only with
-    /// the key fully absent is our `Classes\.ext\Default` honored directly
-    /// (verified: a pristine extension with only a Classes default opens
-    /// without any picker).
-    ///
-    /// Windows-signed keys (e.g. ones set via Default Apps settings) deny
-    /// deletion outright; for those we fall back to clearing the values,
-    /// and the dialog shows them as protected.
-    fn clear_userchoice_overrides() {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts";
+        let mut ok = 0usize;
+        let mut failures = Vec::new();
         for ext in EXTENSIONS {
-            let uc_path = format!(r"{base}\.{ext}\UserChoice");
-            if hkcu.delete_subkey(&uc_path).is_ok() {
-                continue;
-            }
-            // Fallback: clear the values inside the protected key.
-            if let Ok(key) = hkcu.open_subkey_with_flags(&uc_path, KEY_SET_VALUE) {
-                let _ = key.delete_value("ProgId");
-                let _ = key.delete_value("Hash");
+            match crate::user_choice::set_default(ext, PROG_ID) {
+                Ok(()) => ok += 1,
+                Err(e) => failures.push(e),
             }
         }
+        notify_explorer();
+
+        if failures.is_empty() {
+            Ok(format!(
+                "Done — all {ok} file types now open with 3D Viewer by default."
+            ))
+        } else if ok == 0 {
+            Err(failures.join("; "))
+        } else {
+            Ok(format!(
+                "{ok}/{} set as default. Failed: {}",
+                EXTENSIONS.len(),
+                failures.join("; ")
+            ))
+        }
+    }
+
+    /// Remove all registrations (ProgID + extension references + UserChoice).
+    pub fn unregister() -> Result<String, String> {
+        let count = clear_all_extensions().map_err(|e| e.to_string())?;
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts";
+        let mut cleared = 0usize;
+        for ext in EXTENSIONS {
+            if hkcu
+                .delete_subkey(format!(r"{base}\.{ext}\UserChoice"))
+                .is_ok()
+            {
+                cleared += 1;
+            }
+        }
+        notify_explorer();
+        Ok(format!(
+            "Done — removed 3D Viewer from {count} types and cleared {cleared} Windows defaults."
+        ))
     }
 
     /// Write the Classes entries for all extensions (Default + OpenWithProgids).
@@ -258,10 +262,10 @@ pub mod imp {
     /// File association is not supported on non-Windows platforms.
     pub const PROG_ID: &str = "3DViewer.Rust";
     pub const EXTENSIONS: [&str; 8] = ["glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif"];
-    pub fn register() -> Result<usize, String> {
+    pub fn register() -> Result<String, String> {
         Err("File associations are only supported on Windows".into())
     }
-    pub fn unregister() -> Result<usize, String> {
+    pub fn unregister() -> Result<String, String> {
         Err("File associations are only supported on Windows".into())
     }
     pub fn is_registered() -> bool {

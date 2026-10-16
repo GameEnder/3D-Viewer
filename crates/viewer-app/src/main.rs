@@ -10,6 +10,7 @@ mod file_assoc;
 mod paint;
 mod panels;
 mod themes;
+mod user_choice;
 
 fn main() -> eframe::Result<()> {
     // Command-line file argument: when Explorer double-click-opens a model
