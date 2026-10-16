@@ -1,4 +1,9 @@
 // crates/viewer-app/src/main.rs
+// Windows GUI subsystem in release builds — no console window appears
+// when the exe is launched from Explorer or a shortcut. Debug builds
+// keep the console so stderr/stdout stay visible during development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod camera;
 mod file_assoc;
