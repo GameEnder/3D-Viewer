@@ -247,16 +247,31 @@ pub fn preferences_dialog(ctx: &egui::Context, s: &mut PreferencesState) {
                 ui.add_space(4.0);
 
                 for ext in crate::file_assoc::EXTENSIONS {
-                    let handler = crate::file_assoc::default_handler(ext);
+                    let prog_id = crate::file_assoc::PROG_ID;
+                    let handler = crate::file_assoc::effective_handler(ext);
+                    let protected =
+                        crate::file_assoc::user_choice(ext).is_some_and(|h| h != prog_id);
                     ui.horizontal(|ui| {
                         ui.label(format!(".{ext}"));
                         match handler {
-                            Some(h) => {
-                                let ours = h == crate::file_assoc::PROG_ID;
-                                let mark = if ours { "→ 3D Viewer" } else { "" };
-                                ui.weak(format!("({h}){mark}"))
+                            Some(h) if h == prog_id => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(100, 200, 100),
+                                    "→ 3D Viewer",
+                                );
                             }
-                            None => ui.weak("(no default)"),
+                            Some(h) if protected => {
+                                ui.colored_label(
+                                    ui.style().visuals.warn_fg_color,
+                                    format!("{h} — protected by Windows, switch below"),
+                                );
+                            }
+                            Some(h) => {
+                                ui.weak(format!("({h})"));
+                            }
+                            None => {
+                                ui.weak("(no default)");
+                            }
                         }
                     });
                 }
@@ -293,9 +308,17 @@ pub fn preferences_dialog(ctx: &egui::Context, s: &mut PreferencesState) {
                 });
                 ui.add_space(4.0);
                 ui.weak(
-                    "Note: Explorer may need a refresh (F5 on the desktop) or a restart \
-                     for icons to update. No admin rights required.",
+                    "Windows protects defaults you previously chose (Settings or \
+                     'Open with → Always'). Registering adds 3D Viewer to the \
+                     'Open with' menu and makes it the default where Windows \
+                     allows; protected types must be switched by hand once.",
                 );
+                ui.add_space(4.0);
+                if ui.button("Open Windows Default Apps settings…").clicked() {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg("ms-settings:defaultapps")
+                        .spawn();
+                }
             }
 
             #[cfg(not(windows))]

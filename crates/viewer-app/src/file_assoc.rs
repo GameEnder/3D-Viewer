@@ -164,19 +164,54 @@ pub mod imp {
 
     /// Tell Explorer that file associations have changed (SHCNE_ASSOCCHANGED).
     /// Without this, Explorer keeps using the cached association until it is
-    /// restarted or the user refreshes the desktop.
+    /// restarted.
+    ///
+    /// Direct FFI: `SHChangeNotify(LONG, UINT, LPCITEMIDLIST, LPCITEMIDLIST)`
+    /// is not a valid rundll32 entry point (rundll32 requires
+    /// `CALLBACK(HWND, HINSTANCE, LPSTR, int)`), so the old
+    /// `rundll32 shell32.dll,SHChangeNotify ...` trick silently did nothing.
+    /// The signature has been frozen since Windows 95.
     fn notify_explorer() {
-        // SHChangeNotify via rundll32 — avoids unsafe FFI in our codebase.
-        // SHCNE_ASSOCCHANGED = 0x08000000, SHCNF_FLUSH = 0x1000.
-        let _ = std::process::Command::new("rundll32")
-            .args([
-                "shell32.dll,SHChangeNotify",
-                "134217728", // 0x08000000 = SHCNE_ASSOCCHANGED
-                "4096",      // 0x00001000 = SHCNF_FLUSH
-                "0",
-                "0",
-            ])
-            .spawn();
+        const SHCNE_ASSOCCHANGED: u32 = 0x0800_0000;
+        const SHCNF_FLUSH: u32 = 0x0000_1000;
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn SHChangeNotify(wEventId: u32, uFlags: u32, dwItem1: usize, dwItem2: usize);
+        }
+        // SAFETY: passing null pidls (required for ASSOCCHANGED) to a
+        // thread-safe Shell API. The `usize` pair encodes the null pointers
+        // without materializing raw pointer types in the extern signature.
+        unsafe {
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_FLUSH, 0, 0);
+        }
+    }
+
+    /// Which application does Windows' per-user "UserChoice" protect as the
+    /// default for this extension? Windows writes this when the user picks a
+    /// default (Settings → Default Apps or "Open with → Always") and it takes
+    /// priority over everything in `Software\Classes`. It is hash-protected:
+    /// we cannot set or clear it programmatically (by design, and attempts
+    /// are denied for keys Windows signed).
+    pub fn user_choice(ext: &str) -> Option<String> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts";
+        let key = hkcu
+            .open_subkey(format!(r"{base}\.{ext}\UserChoice"))
+            .ok()?;
+        let prog_id: String = key.get_value("ProgId").ok()?;
+        if prog_id.is_empty() {
+            None
+        } else {
+            Some(prog_id)
+        }
+    }
+
+    /// The handler Windows will ACTUALLY use when double-clicking `.{ext}`:
+    /// the UserChoice override if present, otherwise the Classes default.
+    /// `default_handler` alone overstates our position when a UserChoice
+    /// points elsewhere.
+    pub fn effective_handler(ext: &str) -> Option<String> {
+        user_choice(ext).or_else(|| default_handler(ext))
     }
 
     /// Check whether our ProgID is currently registered.
@@ -219,9 +254,17 @@ pub mod imp {
     pub fn default_handler(_ext: &str) -> Option<String> {
         None
     }
+    pub fn user_choice(_ext: &str) -> Option<String> {
+        None
+    }
+    pub fn effective_handler(_ext: &str) -> Option<String> {
+        None
+    }
     pub fn exe_path() -> String {
         String::new()
     }
 }
 
-pub use imp::{EXTENSIONS, PROG_ID, default_handler, is_registered, register, unregister};
+pub use imp::{
+    EXTENSIONS, PROG_ID, effective_handler, is_registered, register, unregister, user_choice,
+};
