@@ -92,11 +92,27 @@ pub mod imp {
     /// UserChoice when the user picks a default app in Settings; it takes
     /// priority over `Classes\.ext\Default`, so we must clear it to become
     /// the default handler.
+    ///
+    /// Prefer deleting the ENTIRE UserChoice key: a valueless leftover key
+    /// is worse than none. Windows 11 treats it as an invalid user choice
+    /// and shows the "How do you want to open this file?" picker on every
+    /// open — never falling back to the per-user Classes default. Only with
+    /// the key fully absent is our `Classes\.ext\Default` honored directly
+    /// (verified: a pristine extension with only a Classes default opens
+    /// without any picker).
+    ///
+    /// Windows-signed keys (e.g. ones set via Default Apps settings) deny
+    /// deletion outright; for those we fall back to clearing the values,
+    /// and the dialog shows them as protected.
     fn clear_userchoice_overrides() {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts";
         for ext in EXTENSIONS {
-            let uc_path = format!("{base}\\.{ext}\\UserChoice");
+            let uc_path = format!(r"{base}\.{ext}\UserChoice");
+            if hkcu.delete_subkey(&uc_path).is_ok() {
+                continue;
+            }
+            // Fallback: clear the values inside the protected key.
             if let Ok(key) = hkcu.open_subkey_with_flags(&uc_path, KEY_SET_VALUE) {
                 let _ = key.delete_value("ProgId");
                 let _ = key.delete_value("Hash");
