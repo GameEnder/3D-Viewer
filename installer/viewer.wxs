@@ -120,11 +120,14 @@
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 
-    <!-- Standard wizard: welcome, license, install directory, progress. -->
+    <!-- Standard wizard: welcome, license, install directory, progress.
+         WixVariable (NOT Property!) is the WixUIExtension's build-time hook:
+         light swaps the license dialog's RTF for this file. The path is
+         absolute (baked in by candle) so bind-path resolution can't miss. -->
     <UI>
       <UIRef Id="WixUI_InstallDir" />
       <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
     </UI>
-    <Property Id="WixUILicenseRtf" Value="license.rtf" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
   </Product>
 </Wix>

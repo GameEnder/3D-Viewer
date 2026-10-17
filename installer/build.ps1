@@ -53,24 +53,24 @@ New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
 New-Item -ItemType Directory -Path $outDir   -Force | Out-Null
 
 $wixObj = Join-Path $buildDir 'viewer.wixobj'
+$license = Join-Path $here 'license.rtf'
+if (-not (Test-Path $license)) { throw "license.rtf not found: $license" }
 & $candle -arch x64 `
     "-dProductVersion=$version" `
     "-dRepoRoot=$root" `
+    "-dLicenseRtf=$license" `
     -out $wixObj `
     (Join-Path $here 'viewer.wxs')
 if ($LASTEXITCODE -ne 0) { throw 'candle failed' }
 
 $msi = Join-Path $outDir "3DViewer-$version-x64.msi"
-# light resolves license.rtf relative to the current directory, and the
-# WixUIExtension provides the wizard dialogs.
-Push-Location $here
-try {
-    & $light -ext WixUIExtension `
-        -cultures:en-us `
-        -out $msi `
-        $wixObj
-    if ($LASTEXITCODE -ne 0) { throw 'light failed' }
-} finally { Pop-Location }
+# The WixUIExtension provides the wizard dialogs; the license path is
+# absolute (baked in by candle), so no bind-path resolution is needed.
+& $light -ext WixUIExtension `
+    -cultures:en-us `
+    -out $msi `
+    $wixObj
+if ($LASTEXITCODE -ne 0) { throw 'light failed' }
 
 Write-Output "MSI: $msi"
 Write-Output "Size: $([math]::Round((Get-Item $msi).Length / 1MB, 1)) MB"
