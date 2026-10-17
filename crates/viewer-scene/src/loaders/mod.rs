@@ -6,6 +6,7 @@
 
 pub mod fbx_loader;
 pub mod gltf_loader;
+pub mod ma_loader;
 pub mod nif_loader;
 pub mod obj_loader;
 pub mod ply_loader;
@@ -28,6 +29,7 @@ pub fn load(path: &std::path::Path) -> Result<Scene, LoadError> {
         Some("ply") => ply_loader::load(path)?,
         Some("3mf") => three_mf::load(path)?,
         Some("nif") => nif_loader::load(path)?,
+        Some("ma") => ma_loader::load(path)?,
         Some("fbx") => fbx_loader::load(path)?,
         other => {
             return Err(LoadError::Parse {

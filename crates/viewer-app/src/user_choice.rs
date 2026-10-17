@@ -291,7 +291,9 @@ mod tests {
     #[test]
     #[ignore = "writes real Windows UserChoice defaults for all 8 extensions"]
     fn field_set_defaults_all() {
-        let exts = ["glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif"];
+        let exts = [
+            "glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif", "ma",
+        ];
         for ext in exts {
             set_default(ext, "3DViewer.Rust").unwrap_or_else(|e| panic!(".{ext}: {e}"));
         }

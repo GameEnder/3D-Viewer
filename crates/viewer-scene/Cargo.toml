@@ -13,3 +13,4 @@ byroredux-nif.workspace = true
 zip.workspace = true
 quick-xml.workspace = true
 fbxcel-dom.workspace = true
+maya-mel.workspace = true

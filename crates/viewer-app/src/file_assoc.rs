@@ -24,7 +24,9 @@ pub mod imp {
     pub const PROG_DESCRIPTION: &str = "3D Viewer Model";
 
     /// The extensions we support (without the leading dot).
-    pub const EXTENSIONS: [&str; 8] = ["glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif"];
+    pub const EXTENSIONS: [&str; 9] = [
+        "glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif", "ma",
+    ];
 
     /// Absolute path to the running executable (for the open command).
     pub fn exe_path() -> String {
@@ -261,7 +263,9 @@ pub mod imp {
 pub mod imp {
     /// File association is not supported on non-Windows platforms.
     pub const PROG_ID: &str = "3DViewer.Rust";
-    pub const EXTENSIONS: [&str; 8] = ["glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif"];
+    pub const EXTENSIONS: [&str; 9] = [
+        "glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif", "ma",
+    ];
     pub fn register() -> Result<String, String> {
         Err("File associations are only supported on Windows".into())
     }

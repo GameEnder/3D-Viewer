@@ -85,6 +85,8 @@
                            Name="3DViewer.Rust" Type="string" Value="" />
             <RegistryValue Root="HKLM" Key="Software\Classes\.nif\OpenWithProgids"
                            Name="3DViewer.Rust" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.ma\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
           </Component>
 
         </Directory>

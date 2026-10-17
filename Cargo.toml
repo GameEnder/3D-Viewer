@@ -10,6 +10,7 @@ lto = "thin"
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
 egui-wgpu = "0.36"
 fbxcel-dom = "0.0.10"
+maya-mel = "0.1"
 glam = "0.30"
 gltf = "1"
 byroredux-nif = { git = "https://github.com/matiaszanolli/ByroRedux", package = "byroredux-nif" }

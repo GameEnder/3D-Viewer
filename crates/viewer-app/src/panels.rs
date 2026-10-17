@@ -120,7 +120,9 @@ pub fn menu_bar(ui: &mut egui::Ui) -> MenuBarOutcome {
                         out.open = rfd::FileDialog::new()
                             .add_filter(
                                 "3D models",
-                                &["glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif"],
+                                &[
+                                    "glb", "gltf", "obj", "stl", "ply", "3mf", "fbx", "nif", "ma",
+                                ],
                             )
                             .pick_file();
                         ui.close();
