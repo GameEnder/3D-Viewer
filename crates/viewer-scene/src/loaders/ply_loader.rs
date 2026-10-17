@@ -1,4 +1,22 @@
 // crates/viewer-scene/src/loaders/ply_loader.rs
+//! PLY (Stanford Polygon) loader — both ASCII and little-endian binary.
+//!
+//! PLY is a self-describing format: a text header declares the elements
+//! (`vertex`, `face`, or anything else), their counts, and the exact
+//! property layout (scalar type + name, or variable-length lists for face
+//! indices). The body then follows that schema verbatim — so the loader
+//! parses the header into a small type description and walks the body
+//! against it, rather than assuming a fixed layout.
+//!
+//! Only the properties we render are consumed (`x/y/z`, `nx/ny/nz`,
+//! `red/green/blue`, face index lists); every other property is skipped
+//! in a way that keeps the cursor in sync with the declared schema.
+//! Unknown elements are skipped record-by-record with sanity bounds so a
+//! corrupt count field can never make the loader hang or run off the file.
+//!
+//! PLY has no materials, so vertex colors (if present for a majority of
+//! vertices) are averaged into one sRGB base color for the whole mesh.
+
 use std::path::Path;
 
 use crate::error::LoadError;
@@ -17,8 +35,14 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
     if data.positions.is_empty() {
         return Err(bad("no vertices found"));
     }
+    // Vertex colors -> a single material base color for the whole mesh
+    // (PLY has no materials of its own). The 10-vs-6 cross-multiplication
+    // tests "colors for at least 60% of vertices" without floats: a file
+    // whose colors cover most, but not all, vertices still tints the mesh.
     let mut material = Material::default_pbr();
     if data.colors.len() * 10 >= data.positions.len() * 6 {
+        // Average in sRGB, then linearize once — averaging linear values
+        // would over-weight bright pixels.
         let mut avg = [0.0f32; 3];
         for c in &data.colors {
             for (a, v) in avg.iter_mut().zip(c) {
@@ -49,6 +73,7 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
         indices: data.indices,
         material: 0,
     };
+    // PLY has no hierarchy: one identity node under the scene root.
     let node = scene.add_node(
         scene.root,
         crate::scene::Trs::identity(),
@@ -59,6 +84,7 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
     Ok(scene)
 }
 
+/// sRGB channel -> linear light (PLY colors are sRGB; the renderer is linear).
 fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
@@ -67,12 +93,15 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// Body encoding. Big-endian binary PLY exists in the spec but is vanishingly
+/// rare; we reject it with a clear message rather than misparse it.
 #[derive(Clone, Copy, PartialEq)]
 enum Format {
     Ascii,
     BinaryLe,
 }
 
+/// One of PLY's scalar property types.
 #[derive(Clone, Copy)]
 enum Scalar {
     I8,
@@ -86,6 +115,7 @@ enum Scalar {
 }
 
 impl Scalar {
+    /// On-disk size in bytes (used to compute record strides).
     fn size(self) -> usize {
         match self {
             Scalar::I8 | Scalar::U8 => 1,
@@ -96,6 +126,8 @@ impl Scalar {
     }
 }
 
+/// Accept both the classic PLY spellings (`char`, `uchar`, ...) and the
+/// modern aliases (`int8`, `uint8`, ...).
 fn scalar_from_name(s: &str) -> Option<Scalar> {
     Some(match s {
         "char" | "int8" => Scalar::I8,
@@ -110,6 +142,8 @@ fn scalar_from_name(s: &str) -> Option<Scalar> {
     })
 }
 
+/// A property is either a plain scalar or a variable-length list
+/// (`list <count type> <index type>` — how face indices are stored).
 #[derive(Clone)]
 enum PropKind {
     Scalar(Scalar),
@@ -122,18 +156,22 @@ struct Prop {
     kind: PropKind,
 }
 
+/// A named element with a declared record count and property layout,
+/// e.g. `element vertex 8` / `property float x`.
 struct Element {
     name: String,
     count: usize,
     props: Vec<Prop>,
 }
 
+/// The parsed header: where the body starts, and how to read it.
 struct Header {
     format: Format,
     elements: Vec<Element>,
     body: usize, // byte offset of the data after end_header
 }
 
+/// Everything the loaders manage to extract from the body.
 #[derive(Default)]
 struct PlyData {
     positions: Vec<[f32; 3]>,
@@ -142,6 +180,7 @@ struct PlyData {
     indices: Vec<u32>,
 }
 
+/// Parse-error constructor so every failure says "PLY".
 fn bad(detail: &str) -> LoadError {
     LoadError::Parse {
         format: FMT,
@@ -149,6 +188,13 @@ fn bad(detail: &str) -> LoadError {
     }
 }
 
+/// Parse the text header line-by-line until `end_header`.
+///
+/// The header is line-oriented even when the body is binary, so we scan for
+/// raw `\n` bytes (tolerating CRLF) instead of pulling the whole file into
+/// a str — a binary body could legitimately contain invalid UTF-8.
+/// `end_header`'s byte offset is recorded so the body parsers know exactly
+/// where the data begins.
 fn parse_header(bytes: &[u8]) -> Result<Header, LoadError> {
     let mut format: Option<Format> = None;
     let mut elements: Vec<Element> = Vec::new();
@@ -254,6 +300,8 @@ fn parse_header(bytes: &[u8]) -> Result<Header, LoadError> {
     }
 }
 
+/// Parse one ASCII token as the declared scalar type. Going through f64
+/// keeps integer types exact up to 2^53 while allowing float spellings.
 fn num(tok: &str, t: Scalar) -> Result<f64, LoadError> {
     let v = match t {
         Scalar::F32 => tok.parse::<f32>().ok().map(f64::from),
@@ -264,12 +312,19 @@ fn num(tok: &str, t: Scalar) -> Result<f64, LoadError> {
     v.ok_or_else(|| bad("bad numeric value"))
 }
 
+/// Triangulate a polygon by fanning from vertex 0: (v0, v1, v2),
+/// (v0, v2, v3), ... Works for the convex faces PLY files virtually always
+/// contain; degenerate 0/1/2-corner lists fall out naturally (no output).
 fn fan(out: &mut Vec<u32>, v: &[u32]) {
     for i in 1..v.len().saturating_sub(1) {
         out.extend_from_slice(&[v[0], v[i], v[i + 1]]);
     }
 }
 
+/// Parse an ASCII body: a flat token stream, consumed strictly in the
+/// header's declared order. `vertex` records pull out the fields we know
+/// by name; `face` records read count + that many indices and triangulate;
+/// anything else is skipped with the hang-guard below.
 fn parse_ascii(bytes: &[u8], header: &Header) -> Result<PlyData, LoadError> {
     let text = std::str::from_utf8(&bytes[header.body..])
         .map_err(|_| bad("invalid UTF-8 in ASCII body"))?;
@@ -372,6 +427,7 @@ fn parse_ascii(bytes: &[u8], header: &Header) -> Result<PlyData, LoadError> {
     Ok(data)
 }
 
+/// Read one little-endian scalar at `off` as f64, bounds-checked.
 fn read_num(bytes: &[u8], off: usize, t: Scalar) -> Result<f64, LoadError> {
     let n = t.size();
     if off.saturating_add(n) > bytes.len() {
@@ -390,6 +446,10 @@ fn read_num(bytes: &[u8], off: usize, t: Scalar) -> Result<f64, LoadError> {
     })
 }
 
+/// Parse a binary body, mirroring `parse_ascii` structure for structure.
+/// Vertex records are a fixed stride (sum of scalar sizes), so the cursor
+/// advances by the stride even over properties we do not consume; face
+/// records are count-prefixed and walked one index at a time.
 fn parse_binary(bytes: &[u8], header: &Header) -> Result<PlyData, LoadError> {
     let mut off = header.body;
     let mut data = PlyData::default();

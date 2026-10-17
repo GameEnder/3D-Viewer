@@ -203,6 +203,11 @@ struct ScreenshotJob {
     bytes_per_row: u32,
 }
 
+/// The renderer: owns every pipeline, bind-group layout, uniform buffer and
+/// offscreen target. App interaction is three-phase: `set_scene` uploads a
+/// model, `queue_frame` hands over per-frame parameters, and egui-wgpu's
+/// prepare phase calls `prepare_render` to encode, then `paint` blits the
+/// finished `final` texture into the egui pass.
 pub struct Renderer {
     target_format: wgpu::TextureFormat,
     pbr_pipelines: PbrPipelines,
@@ -268,6 +273,8 @@ pub struct Renderer {
     dummies_cleared: bool,
 }
 
+/// Create a 1x1 texture (placeholder / dummy binding targets). Callers
+/// write the pixel color through a copy or at creation time.
 fn dummy_texture(
     device: &wgpu::Device,
     label: &str,
@@ -291,6 +298,12 @@ fn dummy_texture(
 }
 
 impl Renderer {
+    /// Build the renderer for a surface format (`target_format` is the
+    /// egui surface's format — Bgra8Unorm, NOT Srgb; post.wgsl compensates
+    /// by sRGB-encoding in-shader). Creates all shaders, layouts, uniform
+    /// buffers, pipelines, samplers, fallback/dummy textures, shadow maps,
+    /// the ground disc and the background gradient quad. Offscreen frame
+    /// targets are NOT created here — they need a size (`resize`).
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let pbr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pbr.wgsl"),
@@ -904,6 +917,9 @@ impl Renderer {
         }
     }
 
+    /// Upload a CPU scene and (re)build everything that depends on it:
+    /// mesh/material GPU data, the per-draw model uniform ring, and its
+    /// bind group. Replaces any previously loaded scene.
     pub fn set_scene(
         &mut self,
         device: &wgpu::Device,
@@ -942,6 +958,11 @@ impl Renderer {
         self.gpu_scene = Some(gs);
     }
 
+    /// (Re)create every offscreen target for a new surface size. The frame
+    /// chain is: scene pass -> 4x MSAA HDR (Rgba16Float), resolve to the
+    /// 1x HDR, optional half-res bloom chain, post pass -> `final`
+    /// (surface-format, sRGB-encoded by post.wgsl), which the app's egui
+    /// pass blits to the window. Zero size (minimized) drops all targets.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if width == 0 || height == 0 {
             self.targets = None;
@@ -1041,10 +1062,16 @@ impl Renderer {
         self.screenshot_job = None;
     }
 
+    /// Hand the renderer its next-frame parameters. egui is reactive: the
+    /// app queues a frame only when state changed (or animation is
+    /// playing), and `prepare_render` consumes whatever is queued when
+    /// the platform actually presents.
     pub fn queue_frame(&mut self, params: FrameParams) {
         self.queued = Some(params);
     }
 
+    /// Ask for a copy of the next presented frame (consumed via
+    /// `collect_screenshot`; see the screenshot job struct above).
     pub fn request_screenshot(&mut self) {
         self.pending_screenshot = true;
     }
@@ -1622,6 +1649,8 @@ impl Renderer {
         self.dummies_cleared = true;
     }
 
+    /// Post-pass bind group: resolved HDR + bloom chain result (or a dummy)
+    /// + post uniform. Two variants are kept (see `Renderer::post_bg*`).
     fn build_post_bg(
         &self,
         device: &wgpu::Device,
@@ -1658,6 +1687,8 @@ impl Renderer {
         })
     }
 
+    /// Blit bind group binding the finished `final` texture for the app's
+    /// egui paint pass.
     fn build_blit_bg(
         &self,
         device: &wgpu::Device,
@@ -1680,6 +1711,8 @@ impl Renderer {
     }
 }
 
+/// Bind-group-layout entry for a shadow map's depth texture (group 0,
+/// bindings 2-4 — see the module's binding contract).
 const SHADOW_ENTRY: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
     binding: 0,
     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1691,6 +1724,8 @@ const SHADOW_ENTRY: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
     count: None,
 };
 
+/// Bind-group-layout entry for a filterable float texture (post/blit
+/// inputs).
 const TEX_ENTRY: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
     binding: 0,
     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1702,6 +1737,11 @@ const TEX_ENTRY: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
     count: None,
 };
 
+/// PBR pass pipeline factory. All mesh draws (opaque, double-sided, blend)
+/// and the ground disc share this shape: 4x MSAA into Rgba16Float with
+/// depth; only cull mode, depth-write and blend state vary. `depth_write`
+/// is off for the blend pipeline so transparent draws never occlude each
+/// other's depth.
 #[allow(clippy::too_many_arguments)]
 fn build_pbr_pipeline(
     device: &wgpu::Device,
@@ -1752,6 +1792,9 @@ fn build_pbr_pipeline(
     })
 }
 
+/// Fullscreen-triangle pipeline factory for the post, blit, background and
+/// bloom passes: one oversized triangle covering the viewport, no vertex
+/// buffers, no depth test.
 fn build_fullscreen_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,

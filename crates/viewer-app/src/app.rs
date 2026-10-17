@@ -52,6 +52,9 @@ pub enum AppState {
 
 type LoadResult = Result<viewer_scene::Scene, viewer_scene::LoadError>;
 
+/// The whole application state. One instance lives for the window's
+/// lifetime and implements `eframe::App`; every field is documented with
+/// the UI control that writes it and the frame path that reads it.
 pub struct ViewerApp {
     render_state: Option<egui_wgpu::RenderState>,
     renderer: Option<Arc<Mutex<Renderer>>>,
@@ -165,6 +168,9 @@ impl ViewerApp {
         self
     }
 
+    /// Construct the app: grab eframe's wgpu render state, build our
+    /// `Renderer` behind its shared mutex, render the theme thumbnails,
+    /// and take the user's saved window size (if any) from storage.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // cc.wgpu_render_state is a FIELD in eframe 0.36 (Option<RenderState>;
         // RenderState itself is cloned, no outer Arc in 0.36).
@@ -315,6 +321,10 @@ impl ViewerApp {
         self.model_scale = 1.0;
     }
 
+    /// Assemble the renderer's per-frame parameters from the app state:
+    /// camera matrices, theme+override lighting, effect toggles, turntable
+    /// and static rotation merged into one angle, uniform model scale, and
+    /// the active animation clip/time (if a valid clip is playing).
     fn frame_params(&self, aspect: f32) -> FrameParams {
         let (lights, env_color, env_intensity) = self.themed_lights();
         // Task 17: feed the selected clip + playback time to the renderer

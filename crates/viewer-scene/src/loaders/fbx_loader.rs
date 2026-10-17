@@ -15,6 +15,9 @@ use fbxcel_dom::v7400::object::geometry::TypedGeometryHandle;
 use crate::error::LoadError;
 use crate::scene::{Material, Mesh, Scene, Trs};
 
+/// Load a binary FBX: iterate every geometry object, build one scene node
+/// per mesh. Individual mesh failures become warnings (one bad mesh should
+/// not sink the rest of the file); zero successful meshes is a hard error.
 pub fn load(path: &Path) -> Result<Scene, LoadError> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
@@ -169,6 +172,8 @@ fn load_material(mesh: &fbxcel_dom::v7400::object::geometry::MeshHandle<'_>) -> 
                         && let Ok([r, g, b]) = prop.load_value(F64Arr3Loader)
                     {
                         return Some(Material {
+                            // FBX diffuse colors are linear by convention;
+                            // passed through without sRGB decoding.
                             base_color: [r as f32, g as f32, b as f32, 1.0],
                             ..Material::default_pbr()
                         });

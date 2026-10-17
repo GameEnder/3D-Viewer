@@ -1,4 +1,23 @@
 // crates/viewer-scene/src/loaders/gltf_loader.rs
+//! glTF 2.0 / GLB loader (used for both `.gltf` and `.glb` — the `gltf`
+//! crate handles container differences transparently).
+//!
+//! This is the richest format we support: a node hierarchy with TRS
+//! transforms, PBR materials with textures, and keyframe animations. The
+//! loader preserves all of it:
+//!
+//! - Nodes are created in **BFS order** so parents always precede children
+//!   (the Scene invariant `parent index < child index` needs this), then
+//!   re-parented to their true parents in a second pass.
+//! - glTF primitives become one Mesh each, hung on their node.
+//! - Animations are converted to our `Channel`/`Keyframes` shape, with
+//!   CUBICSPLINE's interleaved in-tangent/value/out-tangent layout
+//!   de-interleaved into parallel vectors.
+//!
+//! Throughout, corrupt data is *rejected* (bounds-checked indices, accessor
+//! bounds, key-count cross-checks) rather than passed downstream where it
+//! would panic the GPU upload or produce NaN transforms during playback.
+
 use std::collections::VecDeque;
 use std::path::Path;
 
@@ -10,9 +29,13 @@ use crate::animation::{Animation, Channel, Interpolation, Keyframes, TrsProperty
 use crate::error::LoadError;
 use crate::scene::{AlphaMode, Image, Material, Mesh, Scene, Trs};
 
+/// Placeholder for a texture that exists in the material but failed to
+/// decode — loud, unmistakable, and keeps the GPU path branch-free.
 const MAGENTA: [u8; 4] = [255, 0, 255, 255];
 
 pub fn load(path: &Path) -> Result<Scene, LoadError> {
+    // `import` loads the JSON/binary plus every referenced buffer and
+    // image into memory in one call.
     let (doc, buffers, images) = gltf::import(path).map_err(|e| LoadError::Parse {
         format: "glTF",
         detail: e.to_string(),
@@ -151,6 +174,9 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
     Ok(scene)
 }
 
+/// Map a glTF PBR material onto ours. Nearly 1:1: glTF's metallic-roughness
+/// model IS the model our renderer implements; textures route through
+/// `texture_or_magenta` so a broken image never becomes a hard failure.
 fn convert_material(
     mat: &gltf::Material,
     images: &[gltf::image::Data],
@@ -197,6 +223,8 @@ fn convert_material(
     }
 }
 
+/// Fetch + decode a texture, or substitute a 1x1 magenta placeholder with a
+/// warning. Missing/broken textures degrade visually but never fail the load.
 fn texture_or_magenta(
     source: Option<gltf::Image>,
     images: &[gltf::image::Data],
@@ -227,6 +255,9 @@ fn texture_or_magenta(
     }
 }
 
+/// Convert decoded image bytes to our RGBA8 `Image`. The glTF crate decodes
+/// most formats for us; only GPU-compressed sources (KTX2/Basis) remain
+/// unsupported.
 fn decode_image(img: &gltf::image::Data) -> Result<Image, LoadError> {
     let w = img.width;
     let h = img.height;
@@ -255,6 +286,9 @@ fn decode_image(img: &gltf::image::Data) -> Result<Image, LoadError> {
     }
 }
 
+/// Convert one glTF primitive into a Mesh. POSITION is mandatory; missing
+/// normals/UVs default to empty (normalize synthesizes normals later), and a
+/// missing index buffer means "sequential" per the glTF spec.
 fn convert_primitive(
     prim: &gltf::Primitive,
     buffers: &[BufferData],
@@ -310,7 +344,12 @@ fn convert_primitive(
 }
 
 // --- raw accessor helpers (manual decode; no crate-internal APIs) ---
+// The animation samplers below read accessors by hand because the crate's
+// iterator-based readers don't expose CUBICSPLINE's triple-element layout.
 
+/// Borrow the raw bytes of a dense accessor, bounds-checked. Sparse
+/// accessors (explicitly allowed by glTF for animation data) are rejected:
+/// they are rare in practice and would silently read zeros here.
 fn accessor_slice<'a>(
     acc: &gltf::Accessor<'a>,
     buffers: &'a [BufferData],
@@ -332,6 +371,7 @@ fn accessor_slice<'a>(
     Ok(&data[start..start + len])
 }
 
+/// Read an animation sampler's input (timestamps): must be f32 SCALAR.
 fn read_f32(acc: &gltf::Accessor, buffers: &[BufferData]) -> Result<Vec<f32>, LoadError> {
     if acc.data_type() != DataType::F32 || acc.dimensions() != Dimensions::Scalar {
         return Err(LoadError::Parse {
@@ -347,6 +387,10 @@ fn read_f32(acc: &gltf::Accessor, buffers: &[BufferData]) -> Result<Vec<f32>, Lo
         .collect())
 }
 
+/// Read an animation sampler's output (keyframe values). Rotation is a
+/// quaternion (VEC4); translation/scale are VEC3, widened to [f32; 4] so all
+/// properties share one value type. `times` is filled by the caller from
+/// the matching input accessor.
 fn read_keyframes(
     acc: &gltf::Accessor,
     buffers: &[BufferData],

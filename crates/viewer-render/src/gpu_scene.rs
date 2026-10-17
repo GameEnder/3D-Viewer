@@ -1,4 +1,15 @@
 // crates/viewer-render/src/gpu_scene.rs
+//! CPU scene -> GPU upload.
+//!
+//! The upload deliberately DE-INDEXES every mesh into a flat triangle soup:
+//! each vertex gets a barycentric coordinate baked in (`BARY`), which is
+//! what lets pbr.wgsl draw wireframe edges and per-triangle effects purely
+//! in the fragment shader — no topology buffers, no extra passes.
+//!
+//! One `GpuMesh` per CPU mesh, one draw entry `(mesh, node)` per node-mesh
+//! pairing (glTF-style: the same mesh instanced on two nodes draws twice,
+//! each with its node's world matrix in the instance slot).
+
 use std::sync::Arc;
 
 use egui_wgpu::wgpu;
@@ -7,6 +18,9 @@ use viewer_scene::{AlphaMode, Image, Scene};
 
 use crate::uniforms::{BARY, MaterialU, Vertex};
 
+/// One uploaded mesh: vertex/index buffers plus the draw-time material
+/// slot and per-material flags the render pass sorts on (`blend` meshes
+/// go to the transparent pass, `double_sided` disables backface culling).
 pub struct GpuMesh {
     pub vertex_buf: wgpu::Buffer,
     pub index_buf: wgpu::Buffer,
@@ -16,10 +30,15 @@ pub struct GpuMesh {
     pub double_sided: bool,
 }
 
+/// One uploaded material: a ready-to-bind group holding the uniform
+/// buffer, all texture views (or shared fallbacks), and the sampler.
 pub struct GpuMaterial {
     pub bind_group: wgpu::BindGroup,
 }
 
+/// The full uploaded scene. `draws` fixes the draw order once so the render
+/// pass is a simple loop; `scene` keeps the CPU data alive for ray-free
+/// CPU-side queries (stats, bounds).
 pub struct GpuScene {
     pub meshes: Vec<GpuMesh>,
     pub materials: Vec<GpuMaterial>,
@@ -28,6 +47,8 @@ pub struct GpuScene {
     pub draws: Vec<(usize, usize)>,
 }
 
+/// Interleaved vertex layout matching `Vertex`: pos(0) normal(1) uv(2)
+/// barycentric(3), 44 bytes per vertex.
 pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: 44,
@@ -57,6 +78,10 @@ pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+/// Upload all meshes: de-index to a triangle soup (each triangle's three
+/// corners get barycentrics [1,0,0]/[0,1,0]/[0,0,1]) and rebuild a
+/// sequential index buffer. Missing per-vertex data falls back safely
+/// (up-facing normal, zero UV) rather than failing the upload.
 pub fn upload(device: &wgpu::Device, _queue: &wgpu::Queue, scene: Arc<Scene>) -> GpuScene {
     let mut meshes = Vec::new();
     let mut draws = Vec::new();
@@ -128,7 +153,10 @@ pub struct MaterialResources<'a> {
     pub fallback_emissive: &'a wgpu::TextureView,
 }
 
-/// Build one uniform buffer + bind group per scene material.
+/// Upload one bind group per material. Absent textures borrow the shared
+/// 1x1 fallback views (white for base/MR so factors pass through,
+/// flat-blue for normals, black for emissive) — the shader never needs
+/// branches for missing textures.
 pub fn upload_materials(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -214,6 +242,10 @@ pub fn upload_materials(
         .collect()
 }
 
+/// Create a 2D RGBA texture from an image (or a 1x1 solid fallback pixel)
+/// and upload its pixels. `srgb` picks the view format: color textures are
+/// sRGB (the GPU decodes on sample), data textures (MR/normal) stay linear
+/// so their numeric channels survive.
 pub fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

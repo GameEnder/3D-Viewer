@@ -94,6 +94,8 @@ pub fn normalize(scene: &mut Scene) {
         rotation: Quat::IDENTITY,
         scale: Vec3::splat(s),
     };
+    // Recompute bounds in the FINAL coordinate space (with the fitted root
+    // transform applied) — these are the bounds the camera frames against.
     let world = world_transforms(scene, &[]);
     let mut all = Vec::new();
     for (node_idx, node) in scene.nodes.iter().enumerate() {

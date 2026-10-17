@@ -1,4 +1,26 @@
 // crates/viewer-scene/src/loaders/three_mf.rs
+//! 3MF (3D Manufacturing Format) loader.
+//!
+//! 3MF is Microsoft's modern 3D-printing package format: a ZIP container
+//! holding XML parts. The geometry lives in the canonical `3D/3dmodel.model`
+//! part (with a fallback to any `.model` under `3D/` for non-conforming
+//! writers), whose structure we parse by streaming XML events:
+//!
+//! ```text
+//! <model>                     -- the whole document
+//!   <resources>
+//!     <basematerials id>      -- named material groups (color only)
+//!     <object id>             -- reusable mesh definitions
+//!       <mesh><vertices>...   -- shared vertex list
+//!       <mesh><triangles v1 v2 v3 [pid p1]>  -- 1-based indices + material
+//!   <build>
+//!     <item objectid transform?>  -- placements of objects in the scene
+//! ```
+//!
+//! Deliberately simplified versus the full spec: item `transform` matrices
+//! are honored but object-level components and production extensions are
+//! not, and materials are color-only (3MF has no metallic/roughness).
+
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
@@ -8,9 +30,11 @@ use quick_xml::events::{BytesStart, Event};
 use crate::error::LoadError;
 use crate::scene::{AlphaMode, Material, Mesh, Scene, Trs};
 
+/// Error-format prefix and the canonical model part name inside the package.
 const FMT: &str = "3MF";
 const CORE_MODEL: &str = "3D/3dmodel.model";
 
+/// Parse-error constructor so every failure in this file says "3MF".
 fn bad(detail: &str) -> LoadError {
     LoadError::Parse {
         format: FMT,
@@ -18,6 +42,7 @@ fn bad(detail: &str) -> LoadError {
     }
 }
 
+/// sRGB channel -> linear light (3MF colors are sRGB, our renderer is linear).
 fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
@@ -26,28 +51,36 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// One raw triangle before material resolution: 3 vertex indices plus the
+/// optional `(basematerials group id, index-in-group)` material reference.
 struct RawTri {
     v: [u32; 3],
     mat: Option<(u32, u32)>, // (pid, p1)
 }
 
+/// An object as stored in `<resources>`: a mesh definition that `<item>`
+/// entries reference by id. Objects are templates until placement.
 struct RawObject {
     name: Option<String>,
     positions: Vec<[f32; 3]>,
     tris: Vec<RawTri>,
 }
 
+/// A `<basematerials>` group: a numbered palette of base colors.
 struct MatGroup {
     id: Option<u32>,
     materials: Vec<Material>,
 }
 
+/// A `<build><item>`: one placement of an object into the scene.
 struct Item {
     objectid: u32,
 }
 
+/// Everything extracted from the XML before scene building.
 struct Model {
     objects: Vec<RawObject>,
+    /// object id -> index into `objects` (ids are arbitrary u32s).
     obj_ids: HashMap<u32, usize>,
     groups: Vec<MatGroup>,
     items: Vec<Item>,
@@ -125,6 +158,8 @@ fn attr(e: &BytesStart, name: &[u8]) -> Result<Option<String>, LoadError> {
     Ok(None)
 }
 
+/// Required f32 attribute: must exist, parse, and be finite (rejects NaN/inf
+/// vertex coordinates, which would poison bounds and normals downstream).
 fn req_f32(e: &BytesStart, key: &[u8], elem: &str, label: &str) -> Result<f32, LoadError> {
     let raw = attr(e, key)?.ok_or_else(|| bad(&format!("<{elem}> missing {label}")))?;
     let v: f32 = raw
@@ -136,6 +171,9 @@ fn req_f32(e: &BytesStart, key: &[u8], elem: &str, label: &str) -> Result<f32, L
     Ok(v)
 }
 
+/// Required/optional unsigned-index attribute helpers. These exist so error
+/// messages name the exact element and attribute that was bad, instead of a
+/// generic "parse error".
 fn req_u32(e: &BytesStart, key: &[u8], elem: &str, label: &str) -> Result<u32, LoadError> {
     let raw = attr(e, key)?.ok_or_else(|| bad(&format!("<{elem}> missing {label}")))?;
     raw.parse::<u32>()
@@ -152,6 +190,8 @@ fn opt_u32(e: &BytesStart, key: &[u8], elem: &str, label: &str) -> Result<Option
     }
 }
 
+/// `<object id name?>` start: append an empty RawObject and remember its
+/// slot so nested vertex/triangle handlers know where to write.
 fn register_object(e: &BytesStart, model: &mut Model) -> Result<usize, LoadError> {
     let id = opt_u32(e, b"id", "object", "id")?;
     let name = attr(e, b"name")?;
@@ -167,6 +207,7 @@ fn register_object(e: &BytesStart, model: &mut Model) -> Result<usize, LoadError
     Ok(idx)
 }
 
+/// `<basematerials id>` start: register an empty material palette group.
 fn register_basematerials(e: &BytesStart, model: &mut Model) -> Result<usize, LoadError> {
     let id = opt_u32(e, b"id", "basematerials", "id")?;
     let idx = model.groups.len();
@@ -177,6 +218,9 @@ fn register_basematerials(e: &BytesStart, model: &mut Model) -> Result<usize, Lo
     Ok(idx)
 }
 
+/// `<vertex x y z>` inside `<mesh><vertices>`: append to the current object's
+/// shared position list. Silently ignored elsewhere (other 3MF extensions
+/// also define `<vertex>`-like elements).
 fn on_vertex(e: &BytesStart, model: &mut Model, ctx: &Ctx) -> Result<(), LoadError> {
     if !ctx.in_vertices {
         return Ok(());
@@ -190,6 +234,9 @@ fn on_vertex(e: &BytesStart, model: &mut Model, ctx: &Ctx) -> Result<(), LoadErr
     Ok(())
 }
 
+/// `<triangle v1 v2 v3 pid? p1?>`: the optional pid/p1 pair names the
+/// material as (basematerials group id, index within that group). Indices
+/// are stored raw (validated later against the vertex count).
 fn on_triangle(e: &BytesStart, model: &mut Model, ctx: &Ctx) -> Result<(), LoadError> {
     if !ctx.in_triangles {
         return Ok(());
@@ -235,6 +282,9 @@ fn parse_displaycolor(s: &str) -> Option<([f32; 3], f32)> {
     ))
 }
 
+/// `<base displaycolor>`: one entry of a `<basematerials>` palette.
+/// A malformed color becomes a warning + default gray rather than a hard
+/// error — one bad color should not sink an otherwise printable model.
 fn on_base(e: &BytesStart, model: &mut Model, ctx: &Ctx) -> Result<(), LoadError> {
     let Some(gi) = ctx.cur_group else {
         return Ok(());
@@ -262,6 +312,9 @@ fn on_base(e: &BytesStart, model: &mut Model, ctx: &Ctx) -> Result<(), LoadError
     Ok(())
 }
 
+/// `<item objectid>` inside `<build>`: one scene placement. Per-item
+/// `transform` matrices are not supported (warned once per file, since
+/// many writers emit identity transforms anyway).
 fn on_item(e: &BytesStart, model: &mut Model, ctx: &Ctx) -> Result<(), LoadError> {
     if !ctx.in_build {
         return Ok(());
@@ -276,6 +329,11 @@ fn on_item(e: &BytesStart, model: &mut Model, ctx: &Ctx) -> Result<(), LoadError
     Ok(())
 }
 
+/// Stream the model part with quick-xml, maintaining Ctx as a small state
+/// machine: container elements (object/mesh/vertices/triangles/build) set
+/// and clear flags as they open and close; leaf elements (vertex/triangle/
+/// base/item) are handled on Start or Empty. Everything unrecognized is
+/// skipped, which is what makes the loader tolerant of 3MF extensions.
 fn parse_model(data: &[u8]) -> Result<Model, LoadError> {
     let mut reader = quick_xml::Reader::from_reader(data);
     let mut model = Model {
@@ -346,8 +404,12 @@ fn parse_model(data: &[u8]) -> Result<Model, LoadError> {
     Ok(model)
 }
 
-/// Group an object's triangles by material (first-appearance order); an
-/// object without triangles keeps its vertices as a point soup.
+/// Convert one object into draw meshes, splitting triangles into one mesh
+/// per material (the renderer draws one material per mesh).
+///
+/// Every material bucket re-uses the SAME shared position array (cheap:
+/// clone per bucket) with its own index list — the classic indexed-mesh
+/// draw-split pattern.
 fn build_object_meshes(
     scene: &mut Scene,
     obj: &RawObject,
@@ -394,6 +456,14 @@ fn build_object_meshes(
         .collect()
 }
 
+/// Assemble the final Scene from the parsed model:
+/// 1. resolve `<build>` items to objects (all-or-error: a dangling objectid
+///    means the file lies about its own contents),
+/// 2. validate every triangle index against its object's vertex count,
+/// 3. flatten all material groups into one palette and map each triangle's
+///    (pid, p1) to a palette slot,
+/// 4. build meshes once per object (an object instanced twice re-uses the
+///    same mesh list in both nodes).
 fn build_scene(model: Model, path: &Path) -> Result<Scene, LoadError> {
     let Model {
         objects,

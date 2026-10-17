@@ -1,3 +1,8 @@
+//! Build script for the viewer binary: on Windows, embeds the app icon and
+//! version resources into viewer.exe (no-op elsewhere). A build script (not
+//! a post-build step) because winresource must run before the exe is
+//! finalized by the linker.
+
 fn main() {
     // Embed the .ico + version info into viewer.exe on Windows. The version
     // resources (ProductName, FileDescription, etc.) are what Windows shows

@@ -1,6 +1,14 @@
 // crates/viewer-app/src/camera.rs
+//! Spherical orbit camera, modeled after the original 3D Viewer's controls:
+//! the camera sits on a sphere around `target`, parameterized by distance,
+//! elevation angle (clamped near the poles) and azimuth rotation — plus a
+//! dolly zoom and a screen-space pan. Deterministic `fit()` framing means
+//! loading a model or double-click-reset always lands on the same view.
+
 use glam::{Mat4, Vec3};
 
+/// Defaults restored by `fit()` (and used on first load): slightly above
+/// the horizon looking from the front.
 pub const DEFAULT_ELEVATION_DEG: f32 = 15.0;
 pub const DEFAULT_ROTATION_DEG: f32 = -90.0;
 pub const DEFAULT_FOV_DEG: f32 = 45.0;
@@ -16,6 +24,10 @@ pub struct OrbitCamera {
 }
 
 impl OrbitCamera {
+    /// Frame a bounding sphere: distance = radius / sin(fov/2) puts the
+    /// sphere's cross-section exactly at the frustum's near-width, and the
+    /// 1.25 factor adds the original's comfortable margin. Also resets
+    /// angles/fov — this doubles as the "reset view" action.
     pub fn fit(&mut self, center: Vec3, radius: f32) {
         self.target = center;
         self.elevation_deg = DEFAULT_ELEVATION_DEG;
@@ -36,6 +48,9 @@ impl OrbitCamera {
         c
     }
 
+    /// Camera position from the spherical coordinates. `rotation` is the
+    /// azimuth around +Y (measured so -90° looks from -X), `elevation` the
+    /// angle above the horizon.
     pub fn eye(&self) -> Vec3 {
         let el = self.elevation_deg.to_radians();
         let ro = self.rotation_deg.to_radians();
@@ -55,15 +70,23 @@ impl OrbitCamera {
         (self.proj_matrix(aspect) * self.view_matrix()).to_cols_array_2d()
     }
 
+    /// Drag-to-orbit: horizontal pixels become azimuth degrees (inverted,
+    /// like dragging the model itself), vertical pixels elevation. The
+    /// ±89° elevation clamp keeps the view-up vector from degenerating.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         self.rotation_deg -= dx * 0.5;
         self.elevation_deg = (self.elevation_deg + dy * 0.5).clamp(-89.0, 89.0);
     }
 
+    /// Zoom by a multiplicative factor (scroll wheel), clamped so the
+    /// camera can never pass through or fly away from the model.
     pub fn dolly(&mut self, mult: f32) {
         self.distance = (self.distance / mult.max(0.01)).clamp(0.4, 30.0);
     }
 
+    /// Right-drag pan: convert pixel deltas to world units at the target's
+    /// depth (scale grows with distance and FOV — consistent hand speed at
+    /// any zoom), then move the target along the camera's right/up axes.
     pub fn pan(&mut self, dx: f32, dy: f32, aspect: f32) {
         let scale = self.distance * (self.fov_y_deg.to_radians() * 0.5).tan() / 500.0;
         let view = self.view_matrix();

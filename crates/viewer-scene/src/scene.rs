@@ -1,9 +1,22 @@
 // crates/viewer-scene/src/scene.rs
+//! The format-neutral scene model every loader produces and the renderer
+//! consumes. Keeping this in its own crate (no GPU, no UI types) is what
+//! lets loaders be unit-tested headlessly and the renderer stay agnostic.
+//!
+//! The scene is a flat node array with index-based parent/children links
+//! rather than a recursive tree: cache-friendly, trivially serializable,
+//! and cheap to walk. One invariant makes transform composition a single
+//! forward pass: **a node's index is always greater than its parent's**
+//! (loaders create nodes parent-first, e.g. glTF's BFS order).
+
 use glam::{Quat, Vec3};
 
 use crate::aabb::Aabb;
 use crate::animation::Animation;
 
+/// Translation-Rotation-Scale transform. Stored decomposed (not as a
+/// matrix) because animations tween these channels independently, and the
+/// bottom playback bar lerps between TRS keys.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Trs {
     pub translation: Vec3,
@@ -18,11 +31,16 @@ impl Trs {
             scale: Vec3::ONE,
         }
     }
+    /// Compose into a column-major Mat4 for the GPU. Scale is applied
+    /// first, then rotation, then translation (SRT order).
     pub fn to_mat4(&self) -> glam::Mat4 {
         glam::Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 }
 
+/// How a material's alpha reaches the screen. `Mask` discards fragments
+/// below the cutoff (cheap, no sorting); `Blend` interpolates (needs the
+/// transparent pass).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AlphaMode {
     Opaque,
@@ -30,6 +48,7 @@ pub enum AlphaMode {
     Blend,
 }
 
+/// CPU-side texture: sRGB-encoded RGBA8, row-major, no padding.
 #[derive(Clone, Debug)]
 pub struct Image {
     pub width: u32,
@@ -76,6 +95,9 @@ pub struct Mesh {
     pub material: usize,
 }
 
+/// One transform-hierarchy node. `meshes` holds indices into
+/// `Scene::meshes` — one entry per draw call (glTF primitives, 3MF
+/// material splits, FBX meshes all map onto this).
 #[derive(Clone, Debug)]
 pub struct Node {
     pub name: Option<String>,
@@ -85,6 +107,9 @@ pub struct Node {
     pub meshes: Vec<usize>, // one draw per entry; glTF primitives map here
 }
 
+/// The whole loaded model. `bounds` is filled by `normalize`, as are
+/// missing normals; `tri_count`/`vert_count` accumulate in `add_mesh`
+/// for the Model tab's stats.
 #[derive(Debug)]
 pub struct Scene {
     pub root: usize,
@@ -99,6 +124,7 @@ pub struct Scene {
     pub vert_count: u32,
 }
 impl Scene {
+    /// New scene containing only the identity root node at index 0.
     pub fn new(source_name: String) -> Self {
         Self {
             root: 0,
@@ -122,6 +148,8 @@ impl Scene {
             vert_count: 0,
         }
     }
+    /// Append a node under `parent`. The caller is responsible for the
+    /// parent-first invariant (children after parents in `nodes`).
     pub fn add_node(&mut self, parent: usize, transform: Trs, name: Option<String>) -> usize {
         let idx = self.nodes.len();
         self.nodes.push(Node {
@@ -134,6 +162,8 @@ impl Scene {
         self.nodes[parent].children.push(idx);
         idx
     }
+    /// Register a mesh, updating tri/vertex stats. Non-indexed meshes
+    /// (STL, 3MF point soup) count `positions.len()/3` triangles.
     pub fn add_mesh(&mut self, mesh: Mesh) -> usize {
         let tris = if mesh.indices.is_empty() {
             mesh.positions.len() / 3

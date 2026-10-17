@@ -435,6 +435,7 @@ pub fn right_panel(ui: &mut egui::Ui, mut s: PanelState<'_>, thumbs: ThemeThumbs
         });
 }
 
+/// Small section label used across the tabs (a heading plus breathing room).
 fn section_header(ui: &mut egui::Ui, name: &str) {
     ui.add_space(2.0);
     ui.label(egui::RichText::new(name).heading());
@@ -582,6 +583,9 @@ pub struct ModelStats {
     pub material_count: u32,
 }
 
+/// The Model tab: stats (meshes/materials/tris/verts/size), the wireframe
+/// toggle, the animation quick-picker, and the original-style
+/// turntable/rotation/scale controls.
 fn model_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
     section_header(ui, "Mesh Data");
     match s.source_name {
@@ -657,6 +661,9 @@ pub const VIEWPOINT_ANGLES: [(f32, f32); 8] = [
     (VIEWPOINTS[7].0, VIEWPOINTS[7].1),
 ];
 
+/// The View tab: camera-viewpoint preset thumbnails (GPU-rendered per
+/// model), turntable toggles and speed, and the post-chain exposure /
+/// contrast sliders.
 fn view_tab(ui: &mut egui::Ui, s: &mut PanelState<'_>) {
     section_header(ui, "Viewpoints");
     let thumbs = s.view_thumbs;
@@ -721,6 +728,9 @@ pub struct BottomBarState<'a> {
     pub animations: &'a [viewer_scene::Animation],
 }
 
+/// The always-visible bottom playback bar (original-style): turntable
+/// transport on the left, the animation scrubber + clip picker when the
+/// model has clips, and speed controls on the right.
 pub fn bottom_bar(ui: &mut egui::Ui, s: BottomBarState<'_>) {
     egui::Panel::bottom("playback_bar")
         .resizable(false)

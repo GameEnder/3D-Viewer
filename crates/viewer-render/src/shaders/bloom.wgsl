@@ -1,4 +1,11 @@
 // crates/viewer-render/src/shaders/bloom.wgsl
+// Bloom chain: one shader serving both stages (Task 10), switched by the
+// uniform's threshold sentinel:
+//   - THRESHOLD pass (threshold >= 0.0): soft bright-pass over the
+//     resolved HDR - pixels below the luminance threshold go to zero,
+//     brighter ones keep their excess.
+//   - BLUR passes (threshold = -1.0): 9-tap separable gaussian along
+//     B.direction, run at half resolution via the ping-pong chain in post.rs.
 struct BlurParams { direction: vec2<f32>, threshold: f32, pad: f32 };
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var lin_sampler: sampler;

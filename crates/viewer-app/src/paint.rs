@@ -1,11 +1,23 @@
 // crates/viewer-app/src/paint.rs
+//! The bridge between egui's paint callback system and our wgpu renderer.
+//!
+//! egui-wgpu renders the UI itself, but our 3D scene lives in its own
+//! offscreen `final` texture. An `egui::PaintCallback` (`ScenePaint`) gives
+//! us the two hooks we need at exactly the right moments in the frame:
+//! `prepare` (where wgpu requires all offscreen rendering to be encoded —
+//! we run the full PBR/post chain here) and `paint` (inside egui's own
+//! render pass, where we blit the finished texture under whatever egui
+//! drew on top).
+
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 use egui_wgpu::{CallbackResources, CallbackTrait, RenderState};
 use viewer_render::Renderer;
 
-/// Shared between app update() and the wgpu paint callbacks.
+/// The renderer shared between the app thread (which queues state) and
+/// egui's paint callback (which encodes/blits). Arc<Mutex> because the
+/// callback runs on the same thread but through egui's borrow boundaries.
 #[derive(Clone)]
 pub struct SharedRenderer(pub Arc<Mutex<Renderer>>);
 
@@ -19,9 +31,12 @@ pub fn install(state: &RenderState, renderer: Arc<Mutex<Renderer>>) {
         .insert(SharedRenderer(renderer));
 }
 
+/// The paint callback the app paints into the 3D viewport rect each frame.
 pub struct ScenePaint;
 
 impl CallbackTrait for ScenePaint {
+    /// Encode the whole offscreen frame (shadow passes, scene pass, bloom,
+    /// post) into egui's encoder. Runs BEFORE egui's own pass.
     fn prepare(
         &self,
         device: &egui_wgpu::wgpu::Device,

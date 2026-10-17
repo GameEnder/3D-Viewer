@@ -1,4 +1,9 @@
 // crates/viewer-scene/src/loaders/mod.rs
+//! Format dispatch: one entry per supported extension. Every loader
+//! returns a fully-populated `Scene`; `normalize` then computes bounds,
+//! fits the model to the unit sphere, and fills in missing normals — so
+//! loaders can stay minimal (geometry + materials + hierarchy only).
+
 pub mod fbx_loader;
 pub mod gltf_loader;
 pub mod nif_loader;
@@ -10,6 +15,7 @@ pub mod three_mf;
 use crate::error::LoadError;
 use crate::scene::Scene;
 
+/// Load a model file by its extension (case-insensitive).
 pub fn load(path: &std::path::Path) -> Result<Scene, LoadError> {
     let ext = path
         .extension()
