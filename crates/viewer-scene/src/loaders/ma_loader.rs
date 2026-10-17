@@ -7,16 +7,28 @@
 //! and `currentUnit` declares the file's units. Geometry lives in the mesh
 //! attributes:
 //!
-//! - `.vt`   `-type "vectorArray"`   shared vertex positions (count + N*3)
-//! - `.ed`   `-type "doubleArray"`   edge triplets (start, end, flag; the
-//!   count token is the total double count)
-//! - `.fc[i]`/`.face` `-type "polyFaces"` one face record per entry:
-//!   `f <edgeCount> <signed 1-based edge refs...> [mu <uvSet> <count>
-//!   <uv point idx per face-vertex...>] [h <count> <holes...>]`
-//!   Negative edge references traverse the edge backwards.
-//! - `.uvpt` `-type "float2Array"`   UV points (count + N*2)
+//! - `.vt`   shared vertex positions — two dialects:
+//!   - typed whole-array: `-type "vectorArray" <count> <x y z>...`
+//!   - real exports (2013/2015 verified): a sizing line
+//!     `setAttr -s <N> ".vt";` followed by per-range data lines
+//!     `setAttr ".vt[a:b]" <raw floats...>` with NO count and NO `-type`
+//! - `.ed`   edges as (start, end, flag) triplets — same two dialects
+//!   (`-type "doubleArray" <total> <triplets>` / sized + raw ranges)
+//! - `.fc[a:b]` / `.face` `-type "polyFaces"` (continuation ranges may omit
+//!   `-type`): `f <edgeCount> <edge refs...>` + `mu <uvSet> <count> <uv
+//!   point idx per face-vertex...>`; holes `h ...` are parsed past and
+//!   ignored. Edge references (verified against real Maya 2013/2015
+//!   exports): `k` (>= 0) = edge `k` forward; `-k` = edge `k-1`
+//!   reversed — edge 0 reversed is `-1`. One entry may carry many `f`
+//!   records (real files pack ~500 per range line).
+//! - `.uvst[0].uvsp[a:b]` (modern) / `.uvpt` (older) UV points:
+//!   `-type "float2"` raw ranges, or `"float2Array" <count>` whole-array
 //! - `.t`/`.r`/`.s` `-type "double3"` transform translate / rotate (Euler
-//!   XYZ, in `currentUnit` angle units — degrees by default) / scale
+//!   XYZ, in `currentUnit` angle units — degrees by default) / scale,
+//!   plus `.rp`/`.sp` rotate/scale pivots (default zero). The local
+//!   matrix is `T(t) * T(rp) * R * T(-rp) * T(sp) * S * T(-sp)`; rotate
+//!   pivot translations (`.rpt`/`.spt`) and non-XYZ rotate orders are
+//!   ignored.
 //!
 //! The mesh is emitted as a face-vertex soup (positions duplicated per
 //! face, like STL but with UVs), so UV seams stay exact and no
@@ -27,9 +39,9 @@
 //! networks are out of scope).
 //!
 //! Known v1 simplifications (warnings are NOT emitted for these):
-//! rotate pivots (`.rp`/`.sp`) and non-XYZ rotate orders are ignored,
-//! `rename` after creation is not tracked, references and instancing are
-//! not followed, and only UV set 0 is read.
+//! rotate-pivot translations (`.rpt`/`.spt`) and non-XYZ rotate orders are
+//! ignored, `rename` after creation is not tracked, references and
+//! instancing are not followed, and only UV set 0 is read.
 
 use std::path::Path;
 
@@ -68,15 +80,22 @@ struct MaNode {
     t: Option<[f64; 3]>,
     r: Option<[f64; 3]>,
     s: Option<[f64; 3]>,
+    /// Rotate / scale pivots (None = zero).
+    rp: Option<[f64; 3]>,
+    sp: Option<[f64; 3]>,
     /// Shared vertex positions.
     vt: Vec<[f32; 3]>,
     /// Edge list: (start vertex, end vertex), 0-based.
     ed: Vec<(usize, usize)>,
     /// Faces: (signed 1-based edge refs, per-face-vertex UV point indices).
-    faces: Vec<(Vec<i64>, Vec<usize>)>,
-    /// UV points.
+    faces: Vec<FaceRecord>,
+    /// UV points (`.uvst[0].uvsp` / `.uvpt`).
     uvpt: Vec<[f32; 2]>,
 }
+
+/// One polyFaces face record: (signed 1-based edge refs, per-face-vertex
+/// UV point indices).
+type FaceRecord = (Vec<i64>, Vec<usize>);
 
 impl MaNode {
     fn new(name: Option<String>, is_mesh: bool, parent: Option<String>) -> Self {
@@ -87,6 +106,8 @@ impl MaNode {
             t: None,
             r: None,
             s: None,
+            rp: None,
+            sp: None,
             vt: vec![],
             ed: vec![],
             faces: vec![],
@@ -220,8 +241,12 @@ fn register_node(
     nodes.len() - 1
 }
 
-/// Apply one `setAttr` to its target node (last created node for relative
-/// paths like `.vt`, name-resolved for absolute ones like `shape.vt`).
+/// Apply one `setAttr` to its target node. Relative paths (leading dot)
+/// target the most recently created node; absolute `node.attr` paths
+/// resolve by name. The meaningful attr suffix is the last dot-separated
+/// component with any `[...]` index stripped (`.uvst[0].uvsp[3:9]` ->
+/// `uvsp`).
+#[allow(clippy::too_many_lines)]
 fn apply_set_attr(
     sa: &MayaSetAttrCommand,
     src: SourceView<'_>,
@@ -232,65 +257,188 @@ fn apply_set_attr(
     let Some(attr_path) = sa.attr_path.as_ref().and_then(|i| text(i, src)) else {
         return Ok(());
     };
-    // Absolute form "nodeName.attr" resolves by name; relative ".attr"
-    // targets the most recently created node.
-    let (target, attr) = match attr_path.rsplit_once('.') {
-        Some((node_name, attr)) if !node_name.is_empty() => {
-            let name = clean_name(node_name);
-            match nodes.iter().position(|n| n.name.as_deref() == Some(name)) {
-                Some(i) => (i, attr),
-                None => return Ok(()), // unknown target: ignore silently
-            }
-        }
-        _ => match current {
-            // Relative paths still carry the leading dot: ".vt" -> "vt".
-            Some(i) => (i, attr_path.strip_prefix('.').unwrap_or(attr_path)),
-            None => return Ok(()),
-        },
-    };
-    // Split off component suffixes: ".fc[3]" -> "fc".
-    let suffix = attr.split('[').next().unwrap_or(attr);
-
     let ty = sa.type_name.as_ref().and_then(|i| text(i, src));
-    let values = sa
-        .values
-        .iter()
-        .filter_map(|i| text(i, src))
-        .collect::<Vec<_>>();
-    let node = &mut nodes[target];
+    let values: Vec<&str> = sa.values.iter().filter_map(|i| text(i, src)).collect();
 
-    match suffix {
-        "vt" if ty == Some("vectorArray") => {
-            node.vt = parse_vector_array(&values)?;
+    let (target, attr_full) = if attr_path.starts_with('.') {
+        // Relative: every dot-separated component belongs to the attr.
+        match current {
+            Some(i) => (i, attr_path),
+            None => return Ok(()),
         }
-        "ed" if ty == Some("doubleArray") => {
-            node.ed = parse_edge_array(&values)?;
-        }
-        "uvpt" if ty == Some("float2Array") => {
-            node.uvpt = parse_float2_array(&values)?;
-        }
-        "fc" | "face" if ty == Some("polyFaces") => {
-            let face = parse_poly_face(&values)?;
-            if let Some(f) = face {
-                node.faces.push(f);
-            } else {
-                warnings.push(format!(
-                    "skipping degenerate polyFaces entry on {attr_path}"
-                ));
+    } else {
+        // Absolute "node.attr": resolve the node by name.
+        match attr_path.rsplit_once('.') {
+            Some((node_name, attr)) => {
+                let name = clean_name(node_name);
+                match nodes.iter().position(|n| n.name.as_deref() == Some(name)) {
+                    Some(i) => (i, attr),
+                    None => return Ok(()), // unknown target: ignore silently
+                }
             }
+            None => return Ok(()),
         }
-        "t" if ty == Some("double3") => {
-            node.t = parse_double3(&values);
-        }
-        "r" if ty == Some("double3") => {
-            node.r = parse_double3(&values);
-        }
-        "s" if ty == Some("double3") => {
-            node.s = parse_double3(&values);
-        }
+    };
+
+    // Suffix: strip leading dots, take the last dot component, cut at '['.
+    let suffix_pos = attr_full.rfind('.').map_or(0, |i| i + 1);
+    let suffix = attr_full[suffix_pos..]
+        .split('[')
+        .next()
+        .unwrap_or(attr_full);
+    // Element range `[a:b]` (or `[i]`) attached to the SUFFIX component
+    // only — never an earlier index bracket like the uv-set in
+    // `.uvst[0].uvsp` (which otherwise masquerades as range 0:0).
+    let range = parse_range(attr_full, suffix_pos);
+
+    let node = &mut nodes[target];
+    match suffix {
+        // Vertex positions. Typed whole-array writes carry a count token
+        // and replace; real per-range data lines carry raw floats and append.
+        "vt" => match (ty, range) {
+            (Some("vectorArray"), _) => node.vt = parse_vector_array(&values)?,
+            (None, Some(range)) => {
+                node.vt
+                    .extend(parse_raw_floats3(&values, range, "vertex array")?);
+            }
+            _ => {}
+        },
+        // Edges: (start, end, flag) triplets.
+        "ed" => match (ty, range) {
+            (Some("doubleArray"), _) => node.ed = parse_edge_array(&values)?,
+            (None, Some(range)) => node.ed.extend(parse_raw_edges(&values, range)?),
+            _ => {}
+        },
+        // UV points: modern `.uvst[0].uvsp` ranges (float2) and older
+        // `.uvpt` whole arrays (float2Array).
+        "uvpt" | "uvsp" => match (ty, range) {
+            (Some("float2Array"), _) => node.uvpt = parse_float2_array(&values)?,
+            (Some("float2"), Some(range)) | (None, Some(range)) => {
+                node.uvpt
+                    .extend(parse_raw_floats2(&values, range, "UV point array")?);
+            }
+            _ => {}
+        },
+        // Faces: one entry can carry many `f` records (both dialects);
+        // continuation ranges may omit `-type "polyFaces"`. Sizing lines
+        // (`-s N ".fc";`, no values) parse to zero records silently.
+        "fc" | "face" => match ty {
+            Some("polyFaces") | None => {
+                let records = parse_poly_faces(&values)?;
+                if records.is_empty() && !values.is_empty() {
+                    warnings.push(format!("skipping empty polyFaces entry on {attr_path}"));
+                }
+                node.faces.extend(records);
+            }
+            _ => {}
+        },
+        // Transform channels (both dialects type them "double3").
+        "t" if ty == Some("double3") => node.t = parse_double3(&values),
+        "r" if ty == Some("double3") => node.r = parse_double3(&values),
+        "s" if ty == Some("double3") => node.s = parse_double3(&values),
+        "rp" if ty == Some("double3") => node.rp = parse_double3(&values),
+        "sp" if ty == Some("double3") => node.sp = parse_double3(&values),
         _ => {}
     }
     Ok(())
+}
+
+/// Parse an element range `[a:b]` (or a single `[i]`) into an inclusive
+/// (start, end) pair, searching only at/after `from` so index brackets on
+/// earlier components (`.uvst[0].uvsp[0:249]`) are not misread.
+fn parse_range(attr: &str, from: usize) -> Option<(usize, usize)> {
+    let start = attr.get(from..)?.find('[')? + from;
+    let body = attr.get(start + 1..)?.split(']').next()?;
+    if let Some((a, b)) = body.split_once(':') {
+        Some((a.parse().ok()?, b.parse().ok()?))
+    } else {
+        let i: usize = body.parse().ok()?;
+        Some((i, i))
+    }
+}
+
+/// Raw per-range position data: exactly `count` triples of floats.
+fn parse_raw_floats3(
+    values: &[&str],
+    range: (usize, usize),
+    what: &str,
+) -> Result<Vec<[f32; 3]>, LoadError> {
+    let count = range.1 - range.0 + 1;
+    if values.len() != count * 3 {
+        return Err(bad(&format!(
+            "{what} range {}:{} holds {} numbers, expected {}",
+            range.0,
+            range.1,
+            values.len(),
+            count * 3
+        )));
+    }
+    let mut out = Vec::with_capacity(count);
+    for c in values.as_chunks::<3>().0 {
+        out.push([
+            parse_f64(c[0], what)? as f32,
+            parse_f64(c[1], what)? as f32,
+            parse_f64(c[2], what)? as f32,
+        ]);
+    }
+    Ok(out)
+}
+
+/// Raw per-range UV data: exactly `count` pairs.
+fn parse_raw_floats2(
+    values: &[&str],
+    range: (usize, usize),
+    what: &str,
+) -> Result<Vec<[f32; 2]>, LoadError> {
+    let count = range.1 - range.0 + 1;
+    if values.len() != count * 2 {
+        return Err(bad(&format!(
+            "{what} range {}:{} holds {} numbers, expected {}",
+            range.0,
+            range.1,
+            values.len(),
+            count * 2
+        )));
+    }
+    let mut out = Vec::with_capacity(count);
+    for c in values.as_chunks::<2>().0 {
+        out.push([parse_f64(c[0], what)? as f32, parse_f64(c[1], what)? as f32]);
+    }
+    Ok(out)
+}
+
+/// Raw per-range edge data: exactly `count` (start, end, flag) triplets.
+fn parse_raw_edges(
+    values: &[&str],
+    range: (usize, usize),
+) -> Result<Vec<(usize, usize)>, LoadError> {
+    let count = range.1 - range.0 + 1;
+    if values.len() != count * 3 {
+        return Err(bad(&format!(
+            "edge range {}:{} holds {} numbers, expected {}",
+            range.0,
+            range.1,
+            values.len(),
+            count * 3
+        )));
+    }
+    values
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| {
+            Ok((
+                parse_f64(c[0], "edge array")? as usize,
+                parse_f64(c[1], "edge array")? as usize,
+            ))
+        })
+        .collect()
+}
+
+/// Parse a single f64 with a context label.
+fn parse_f64(raw: &str, what: &str) -> Result<f64, LoadError> {
+    raw.parse::<f64>()
+        .map_err(|_| bad(&format!("bad number {raw:?} in {what}")))
 }
 
 /// `vectorArray` values: [count, x y z ...] -> positions.
@@ -360,36 +508,41 @@ fn parse_float2_array(values: &[&str]) -> Result<Vec<[f32; 2]>, LoadError> {
         .collect())
 }
 
-/// One polyFaces face record: (signed 1-based edge refs, per-face-vertex
-/// UV point indices).
-type FaceRecord = (Vec<i64>, Vec<usize>);
-
-/// One polyFaces entry: `f <count> <refs...> [mu <set> <count> <idx...>]`
-/// (holes `h <count> <refs...>` are parsed past and ignored). Returns the
-/// record, or None for a face with no usable geometry.
-fn parse_poly_face(values: &[&str]) -> Result<Option<FaceRecord>, LoadError> {
-    let mut refs: Vec<i64> = Vec::new();
-    let mut uvs: Vec<usize> = Vec::new();
+/// One polyFaces entry can hold MANY face records (real files pack 500
+/// per range line, the synthetic `.fc[i]` form holds one): every `f`
+/// starts a new record, `mu` attaches UV indices to the current record,
+/// holes `h ...` are parsed past and ignored (v1 renders the face
+/// without the hole).
+fn parse_poly_faces(values: &[&str]) -> Result<Vec<FaceRecord>, LoadError> {
+    let mut records: Vec<FaceRecord> = Vec::new();
     let mut i = 0usize;
     while i < values.len() {
         match values[i] {
             "f" => {
                 i += 1;
                 let count = next_int(values, &mut i, "face edge count")?;
+                let mut refs = Vec::with_capacity(count.max(0) as usize);
                 for _ in 0..count {
                     refs.push(next_int(values, &mut i, "face edge ref")?);
+                }
+                if refs.len() >= 3 {
+                    records.push((refs, Vec::new()));
                 }
             }
             "mu" => {
                 i += 1;
                 let _set = next_int(values, &mut i, "mu uv set")?;
                 let count = next_int(values, &mut i, "mu count")?;
+                let mut uvs = Vec::with_capacity(count.max(0) as usize);
                 for _ in 0..count {
                     uvs.push(next_int(values, &mut i, "mu uv index")? as usize);
                 }
+                if let Some(last) = records.last_mut() {
+                    last.1 = uvs;
+                }
             }
             "h" => {
-                // Hole: parse past it (v1 renders the face without the hole).
+                // Hole: parse past it.
                 i += 1;
                 let count = next_int(values, &mut i, "hole edge count")?;
                 for _ in 0..count {
@@ -401,10 +554,7 @@ fn parse_poly_face(values: &[&str]) -> Result<Option<FaceRecord>, LoadError> {
             }
         }
     }
-    if refs.len() < 3 {
-        return Ok(None);
-    }
-    Ok(Some((refs, uvs)))
+    Ok(records)
 }
 
 /// `double3` values (no count token).
@@ -476,13 +626,20 @@ fn world_transform(
     world
 }
 
-/// One node's local TRS matrix. Rotate is Euler XYZ in the file's angle
-/// unit (degrees unless currentUnit declared radians); pivots are ignored.
+/// One node's local matrix, pivot-aware:
+/// `T(t) * T(rp) * R * T(-rp) * T(sp) * S * T(-sp)`
+/// (rotations pivot around `rp`, scaling around `sp`; both default to the
+/// origin). Rotate is Euler XYZ in the file's angle unit (degrees unless
+/// currentUnit declared radians); rotate-pivot translations and
+/// non-XYZ rotate orders are ignored.
 fn trs_matrix(node: &MaNode, angle_in_radians: bool) -> glam::Mat4 {
-    let t = node
-        .t
-        .map(|v| Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32))
-        .unwrap_or(Vec3::ZERO);
+    let v3 = |o: &Option<[f64; 3]>| {
+        o.map(|v| Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32))
+            .unwrap_or(Vec3::ZERO)
+    };
+    let t = v3(&node.t);
+    let sp = v3(&node.sp);
+    let rp = v3(&node.rp);
     let rot = node
         .r
         .map(|v| {
@@ -503,7 +660,14 @@ fn trs_matrix(node: &MaNode, angle_in_radians: bool) -> glam::Mat4 {
         .s
         .map(|v| Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32))
         .unwrap_or(Vec3::ONE);
-    glam::Mat4::from_scale_rotation_translation(s, rot, t)
+
+    glam::Mat4::from_translation(t)
+        * glam::Mat4::from_translation(rp)
+        * glam::Mat4::from_quat(rot)
+        * glam::Mat4::from_translation(-rp)
+        * glam::Mat4::from_translation(sp)
+        * glam::Mat4::from_scale(s)
+        * glam::Mat4::from_translation(-sp)
 }
 
 /// Build a face-vertex soup mesh: each face emits its own corners (exact
@@ -526,19 +690,27 @@ fn build_mesh(node: &MaNode, world: glam::Mat4) -> Result<Mesh, String> {
     let mut uvs: Vec<[f32; 2]> = Vec::new();
 
     for (refs, mu) in &node.faces {
-        // Oriented vertex chain: the start vertex of each oriented edge
-        // (positive ref = a->b, negative = b->a).
+        // Oriented vertex chain: the START vertex of each oriented edge.
+        // Edge references (verified against real Maya 2013/2015 exports,
+        // 1806/1806 faces close): positive or zero `k` = edge `k` forward;
+        // negative `-k` = edge `k-1` reversed — so edge 0 reversed is
+        // written as -1, and plain 0 is always edge 0 forward.
         let mut ring: Vec<usize> = Vec::with_capacity(refs.len());
         for &r in refs {
-            let e = r.unsigned_abs() as usize;
-            if e == 0 || e > node.ed.len() {
-                return Err(format!(
+            let edge_err = |r: i64| {
+                format!(
                     "face references edge {r} but mesh has {} edges",
                     node.ed.len()
-                ));
-            }
-            let (a, b) = node.ed[e - 1];
-            ring.push(if r > 0 { a } else { b });
+                )
+            };
+            let start = if r >= 0 {
+                let e = r as usize;
+                node.ed.get(e).ok_or_else(|| edge_err(r))?.0
+            } else {
+                let e = (r.unsigned_abs() - 1) as usize;
+                node.ed.get(e).ok_or_else(|| edge_err(r))?.1
+            };
+            ring.push(start);
         }
         // Face-vertex UVs align with the ring order when mu has enough
         // entries; otherwise the face renders without UVs.

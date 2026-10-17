@@ -41,13 +41,15 @@ fn build_cube_scene() -> String {
         (-0.5, 0.5, 0.5),
     ];
     let faces: [&[&str]; 6] = [
-        // (signed 1-based edge refs; all windings outward-verified)
-        &["5", "6", "7", "8"],     // front  (+Z): 4,5,6,7
+        // Edge refs per the real-MayA convention (verified: `k` = edge k
+        // forward, `-k` = edge k-1 reversed — so edge 0 reversed = -1):
+        // (all windings outward-verified via cross products)
+        &["4", "5", "6", "7"],     // front  (+Z): 4,5,6,7
         &["-1", "-4", "-3", "-2"], // back   (-Z): 1,0,3,2
-        &["1", "10", "-5", "-9"],  // bottom (-Y): 0,1,5,4
-        &["12", "-7", "-11", "3"], // top    (+Y): 3,7,6,2
-        &["2", "11", "-6", "-10"], // right  (+X): 1,2,6,5
-        &["9", "8", "-12", "4"],   // left   (-X): 0,4,7,3
+        &["0", "9", "-5", "-9"],   // bottom (-Y): 0,1,5,4
+        &["11", "-7", "-11", "2"], // top    (+Y): 3,7,6,2
+        &["1", "10", "-6", "-10"], // right  (+X): 1,2,6,5
+        &["8", "7", "-12", "3"],   // left   (-X): 0,4,7,3
     ];
 
     let mut s = String::new();
@@ -179,4 +181,35 @@ fn maya_ascii_garbage_is_parse_error() {
     let err = viewer_scene::load(&path).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("Maya"), "error should name the format: {msg}");
+}
+
+/// Loads the real-world test scenes from the author's Desktop when
+/// present (auto-skips on machines without the files). These exercise
+/// the sized-array dialect real Maya writes (`setAttr -s N ".vt";`
+/// followed by untyped per-range data lines) plus pivots.
+#[test]
+fn loads_real_desktop_scenes() {
+    for f in [
+        r"C:\Users\Steven\Desktop\plant_small.ma",
+        r"C:\Users\Steven\Desktop\red fox.ma",
+    ] {
+        let p = std::path::Path::new(f);
+        if !p.exists() {
+            eprintln!("skipping (absent): {f}");
+            continue;
+        }
+        match viewer_scene::load(p) {
+            Ok(s) => {
+                eprintln!(
+                    "{f}: {} meshes, {} tris, {} verts, warnings: {:?}",
+                    s.meshes.len(),
+                    s.tri_count,
+                    s.vert_count,
+                    s.warnings
+                );
+                assert!(s.tri_count > 0, "{f}: loaded but produced no triangles");
+            }
+            Err(e) => panic!("{f}: {e}"),
+        }
+    }
 }
