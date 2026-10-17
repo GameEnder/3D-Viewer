@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3D Viewer - WiX v3 MSI package (x64, per-machine).
+
+  Build with installer\build.ps1, which passes -dProductVersion from
+  crates/viewer-app/Cargo.toml. The UpgradeCode GUID is permanent -
+  never change it, or upgrades will not find this product.
+
+  Machine-wide state installed here (removed at uninstall):
+    - C:\Program Files\3D Viewer\viewer.exe
+    - Start Menu\3D Viewer shortcut
+    - HKLM\Software\Classes\3DViewer.Rust (ProgID: icon, friendly name,
+      open command)
+    - HKLM\Software\Classes\.{ext}\OpenWithProgids for all supported
+      extensions (makes 3D Viewer appear in "Open with" for every user)
+
+  Per-user defaults (UserChoice) are deliberately NOT touched by the
+  MSI: they are set by the app's Edit > Preferences > Register all,
+  which writes Windows-validated per-user choices pointing at the
+  installed exe.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="3D Viewer"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="Steven"
+           UpgradeCode="BA523D5F-0C43-41E4-9984-CCDC42D490DF">
+    <Package InstallerVersion="200"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="3D Viewer - a 3D model viewer (GLB, GLTF, OBJ, STL, PLY, 3MF, FBX, NIF)" />
+
+    <!-- New builds replace older/same versions cleanly. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of 3D Viewer is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Icons are embedded in the MSI; the .ico file itself is not installed. -->
+    <Icon Id="app.ico" SourceFile="$(var.RepoRoot)\crates\viewer-app\resources\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="app.ico" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="3D Viewer">
+
+          <!-- The application: one self-contained exe (static CRT). -->
+          <Component Id="ViewerExe" Guid="26BBC5B8-C362-4CD3-9663-CBF5D1D27614" Win64="yes">
+            <File Id="viewer.exe"
+                  Source="$(var.RepoRoot)\target\release\viewer.exe"
+                  KeyPath="yes" />
+          </Component>
+
+          <!-- Machine-wide ProgID registration. -->
+          <Component Id="ProgIdReg" Guid="64D0D635-C22F-4847-A19D-4792576D513A" Win64="yes">
+            <RegistryKey Root="HKLM" Key="Software\Classes\3DViewer.Rust">
+              <RegistryValue Type="string" Value="3D Viewer Model" KeyPath="yes" />
+              <RegistryValue Name="FriendlyAppName" Type="string" Value="3D Viewer" />
+              <RegistryValue Name="DefaultIcon" Type="string" Value="[INSTALLDIR]viewer.exe,0" />
+              <RegistryKey Key='shell\open'>
+                <RegistryValue Type='string' Value='Open with 3D Viewer' />
+              </RegistryKey>
+              <RegistryKey Key='shell\open\command'>
+                <RegistryValue Type='string'
+                               Value='"[INSTALLDIR]viewer.exe" "%1"' />
+              </RegistryKey>
+            </RegistryKey>
+          </Component>
+
+          <!-- "Open with" visibility for every supported file type. -->
+          <Component Id="ExtensionsReg" Guid="4F30F9DB-BAB7-4700-8BAC-EBC9A5E08A85" Win64="yes">
+            <RegistryValue Root="HKLM" Key="Software\Classes\.glb\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" KeyPath="yes" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.gltf\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.obj\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.stl\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.ply\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.3mf\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.fbx\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\.nif\OpenWithProgids"
+                           Name="3DViewer.Rust" Type="string" Value="" />
+          </Component>
+
+        </Directory>
+      </Directory>
+
+      <!-- Start Menu shortcut (per-machine). -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="AppMenuFolder" Name="3D Viewer">
+          <Component Id="StartMenuShortcut" Guid="52D508DB-BA98-444A-8E62-4BA288E6E197" Win64="yes">
+            <Shortcut Id="AppShortcut"
+                      Name="3D Viewer"
+                      Target="[INSTALLDIR]viewer.exe"
+                      WorkingDirectory="INSTALLDIR"
+                      Icon="app.ico" />
+            <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
+            <!-- ICE38/43: shortcut components key under HKCU. Written to the
+                 installing admin's hive; harmless marker value. -->
+            <RegistryValue Root="HKCU"
+                           Key="Software\3D Viewer"
+                           Name="installed"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Level="1" Title="3D Viewer" Absent="disallow">
+      <ComponentRef Id="ViewerExe" />
+      <ComponentRef Id="ProgIdReg" />
+      <ComponentRef Id="ExtensionsReg" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <!-- Standard wizard: welcome, license, install directory, progress. -->
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+      <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    </UI>
+    <Property Id="WixUILicenseRtf" Value="license.rtf" />
+  </Product>
+</Wix>
