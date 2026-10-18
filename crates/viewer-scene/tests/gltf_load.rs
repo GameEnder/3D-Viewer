@@ -482,29 +482,34 @@ fn loads_skinned_spec_gloss_glb() {
     let path = write_temp("skinned_spec_gloss.glb", &build_skinned_spec_gloss_glb());
     let scene = viewer_scene::load(&path).unwrap();
 
-    // Spec-gloss mapping: diffuseFactor -> base color, glossiness 0.8 ->
-    // roughness 0.2, metallic 0.
+    // Spec-gloss mapping (factors only, no SG texture -> scalar path):
+    // glossiness 0.8 inverts to roughness 0.2; metallic is SOLVED from
+    // diffuse vs specular factors (specular defaults to white [1,1,1],
+    // which pulls metallic high — physically consistent); base color
+    // derives as diffuse / (1 - metallic). Alpha passes through.
     let mat = &scene.materials[0];
     assert!(
-        (mat.base_color[0] - 0.25).abs() < 1e-5,
-        "{:?}",
-        mat.base_color
-    );
-    assert!(
-        (mat.base_color[1] - 0.5).abs() < 1e-5,
-        "{:?}",
-        mat.base_color
-    );
-    assert!(
-        (mat.base_color[2] - 0.75).abs() < 1e-5,
-        "{:?}",
-        mat.base_color
-    );
-    assert!(
         (mat.roughness - 0.2).abs() < 1e-5,
-        "glossiness inverts to roughness"
+        "glossiness inverts to roughness: {:?}",
+        mat.roughness
     );
-    assert!(mat.metallic == 0.0, "spec-gloss maps to metallic 0");
+    assert!(
+        mat.metallic > 0.0 && mat.metallic < 1.0,
+        "solved metallic in range: {:?}",
+        mat.metallic
+    );
+    assert!(
+        (mat.base_color[3] - 1.0).abs() < 1e-5,
+        "alpha from diffuse factor: {:?}",
+        mat.base_color
+    );
+    // Base color is diffuse-derived (brighter than the raw factor since
+    // it compensates for the metallic diffuse suppression).
+    assert!(
+        mat.base_color[0] >= 0.25 && mat.base_color[0] <= 1.0,
+        "{:?}",
+        mat.base_color
+    );
 
     // Skin extraction: one skin, one joint (node index of "joint"), and
     // the mesh carries per-vertex bindings.
@@ -598,4 +603,45 @@ fn loads_real_bee_glb() {
             .any(|m| m.base_color_texture.is_some()),
         "at least one material has the diffuse texture"
     );
+}
+
+/// Field check on the real Bee.glb (author's Desktop; auto-skips): the
+/// spec-gloss materials must be CONVERTED — metallic-roughness textures
+/// baked with sane roughness (no near-mirror blowout) and the diffuse
+/// texture carried into base color.
+#[test]
+fn bee_spec_gloss_is_converted() {
+    let p = std::path::Path::new(r"C:\Users\Steven\Desktop\Bee.glb");
+    if !p.exists() {
+        eprintln!("skipping: Bee.glb absent");
+        return;
+    }
+    let scene = viewer_scene::load(p).unwrap();
+    let mat = &scene.materials[0];
+    // The baked MR texture must exist and carry non-trivial roughness
+    // (the old bug baked nothing: metallic=0, roughness=0.05 flat).
+    let mr = mat
+        .metallic_roughness_texture
+        .as_ref()
+        .expect("spec-gloss must bake an MR texture");
+    assert!(mr.width > 0 && mr.height > 0);
+    // Roughness texels: sample a grid, verify none are near-zero (the
+    // blowout bug produced 0.05 everywhere) and the average is moderate.
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for y in (0..mr.height).step_by((mr.height.max(1) / 32).max(1) as usize) {
+        for x in (0..mr.width).step_by((mr.width.max(1) / 32).max(1) as usize) {
+            let o = ((y * mr.width + x) * 4) as usize;
+            sum += mr.rgba[o + 1] as f32 / 255.0; // G = roughness
+            count += 1;
+        }
+    }
+    let avg_rough = sum / count as f32;
+    eprintln!("bee avg roughness: {avg_rough:.3}");
+    assert!(
+        avg_rough > 0.15,
+        "roughness too low ({avg_rough:.3}) - specular blowout"
+    );
+    // Base color texture present (the diffuse was mapped).
+    assert!(mat.base_color_texture.is_some());
 }
