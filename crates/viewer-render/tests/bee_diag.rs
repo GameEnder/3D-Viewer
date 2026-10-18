@@ -95,8 +95,85 @@ fn bee_scale_and_skinning_diag() {
         "overrides at t=0.5: {} nodes",
         overrides.iter().filter(|o| o.is_some()).count()
     );
+    let clip = &scene.animations[0];
+    eprintln!("clip 0 '{}': {} channels", clip.name, clip.channels.len());
+    // Skin-matrix diversity: if all joints share the same matrix the
+    // animation is a rigid transform, not per-joint deformation.
     let world = viewer_scene::world_transforms(&scene, &overrides);
     let mats = viewer_scene::skinning::joint_matrices_local(skin, &world, scene.root);
+    let fingerprints: std::collections::HashSet<[u8; 16]> = mats
+        .iter()
+        .map(|m| {
+            let col: [f32; 4] = [
+                m.to_cols_array()[0],
+                m.to_cols_array()[1],
+                m.to_cols_array()[2],
+                m.to_cols_array()[3],
+            ];
+            bytemuck::cast(col)
+        })
+        .collect();
+    eprintln!(
+        "distinct skin matrices: {} / {}",
+        fingerprints.len(),
+        mats.len()
+    );
+    // Joint-level animation deltas: compare each joint's animated skin
+    // matrix to its bind one. Rigid = all deltas equal.
+    let world_bind = viewer_scene::world_transforms(&scene, &[]);
+    let mats_bind = viewer_scene::skinning::joint_matrices_local(skin, &world_bind, scene.root);
+    for ji in [0, 1, 20, 50, 100] {
+        if ji >= mats.len() {
+            break;
+        }
+        let name = scene.nodes[skin.joints[ji]].name.as_deref().unwrap_or("?");
+        let d = mats[ji] * mats_bind[ji].inverse();
+        let (t, r, s) = d.to_scale_rotation_translation();
+        eprintln!(
+            "  joint {ji} '{name}': delta_t={:?} rot={:?}° s={:?}",
+            t.to_array(),
+            r.to_axis_angle().1 * 180.0 / std::f32::consts::PI,
+            s.to_array()
+        );
+    }
+    // Sample the animation at multiple times to see if the deformation
+    // grows (wing flaps) or stays rigid (rotation).
+    for t in [0.0f32, 0.5, 2.0, 4.0, 7.0] {
+        let ov = viewer_scene::evaluate(&scene, 0, t);
+        let w = viewer_scene::world_transforms(&scene, &ov);
+        let m = viewer_scene::skinning::joint_matrices_local(skin, &w, scene.root);
+        let (p, _) = viewer_scene::skinning::skin_mesh(mesh, &m);
+        let mut move_sum = 0.0f32;
+        let mut move_max = 0.0f32;
+        for (a, b) in p.iter().zip(mesh.positions.iter()) {
+            let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+            move_sum += d;
+            move_max = move_max.max(d);
+        }
+        let avg = move_sum / p.len() as f32;
+        // Check a wing joint specifically (find by name).
+        let wing_ji = skin
+            .joints
+            .iter()
+            .position(|&j| {
+                scene.nodes[j]
+                    .name
+                    .as_deref()
+                    .is_some_and(|n| n.contains("wing"))
+            })
+            .unwrap_or(20);
+        let wing_name = scene.nodes[skin.joints[wing_ji]]
+            .name
+            .as_deref()
+            .unwrap_or("?");
+        let d_wing = m[wing_ji] * mats_bind[wing_ji].inverse();
+        let (ws, wr, _) = d_wing.to_scale_rotation_translation();
+        eprintln!(
+            "t={t}: avg_move={avg:.4} max_move={move_max:.4}  wing[{wing_ji}]'{wing_name}' rot={:.1}deg scale={:?}",
+            wr.to_axis_angle().1 * 180.0 / std::f32::consts::PI,
+            ws.to_array()
+        );
+    }
     let (anim_pos, _) = viewer_scene::skinning::skin_mesh(mesh, &mats);
     let mut mn2 = glam::Vec3::splat(f32::MAX);
     let mut mx2 = glam::Vec3::splat(f32::MIN);

@@ -731,8 +731,10 @@ pub struct BottomBarState<'a> {
 }
 
 /// The always-visible bottom playback bar (original-style): turntable
-/// transport on the left, the animation scrubber + clip picker when the
-/// model has clips, and speed controls on the right.
+/// transport on the left, and the animation transport (play, scrubber,
+/// clip picker, speed) grouped on the RIGHT when the model has clips.
+/// Grouping the animation controls together prevents the play button
+/// from being confused with the turntable's.
 pub fn bottom_bar(ui: &mut egui::Ui, s: BottomBarState<'_>) {
     egui::Panel::bottom("playback_bar")
         .resizable(false)
@@ -758,44 +760,29 @@ pub fn bottom_bar(ui: &mut egui::Ui, s: BottomBarState<'_>) {
                 {
                     *s.turntable_reset = true;
                 }
-                // Center: animation scrubber (when clips exist) — the original
-                // keeps the timeline here, with clip selection on the right.
-                if !s.animations.is_empty() {
-                    ui.separator();
-                    let clip = s.anim.clip.min(s.animations.len() - 1);
-                    let label = if s.anim.playing { "Pause" } else { "Play" };
-                    if ui
-                        .add_sized(
-                            [56.0, 22.0],
-                            egui::Button::new(egui::RichText::new(label).small()),
-                        )
-                        .clicked()
-                    {
-                        s.anim.playing = !s.anim.playing;
-                    }
-                    let dur = s.animations[clip].duration.max(0.0);
-                    let range = if dur > 0.0 { 0.0..=dur } else { 0.0..=1.0 };
-                    ui.add(egui::Slider::new(&mut s.anim.time, range).show_value(true));
-                }
-                // Right: Quick Animations + speed (original-style).
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if s.animations.is_empty() {
-                        // No clips: turntable speed on the right.
+                if s.animations.is_empty() {
+                    // No clips: turntable speed fills the right side.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add(
                             egui::DragValue::new(s.turntable_speed)
                                 .range(0.0..=90.0)
                                 .suffix(" °/s"),
                         )
                         .on_hover_text("Turntable speed");
-                    } else {
+                    });
+                } else {
+                    // Right: the full animation transport, grouped —
+                    // play/pause, scrubber, clip picker, speed, reset.
+                    // Everything animation-related lives together.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Animation speed drag (× multiplier).
                         ui.add(
                             egui::DragValue::new(&mut s.anim.speed)
                                 .range(0.1..=4.0)
                                 .speed(0.01)
                                 .prefix("×"),
-                        );
-                        // "Normal animation speed" reset button.
+                        )
+                        .on_hover_text("Animation playback speed");
                         if ui
                             .small_button("Normal")
                             .on_hover_text("Reset animation speed to ×1.0")
@@ -824,8 +811,28 @@ pub fn bottom_bar(ui: &mut egui::Ui, s: BottomBarState<'_>) {
                         if s.anim.clip != prev {
                             s.anim.time = 0.0;
                         }
-                    }
-                });
+                        // Scrubber (takes the remaining space between
+                        // the turntable controls and the right group).
+                        let dur = s.animations[clip].duration.max(0.0);
+                        let range = if dur > 0.0 { 0.0..=dur } else { 0.0..=1.0 };
+                        ui.add(
+                            egui::Slider::new(&mut s.anim.time, range)
+                                .show_value(true)
+                                .text(""),
+                        );
+                        // Play / pause.
+                        let label = if s.anim.playing { "Pause" } else { "Play" };
+                        if ui
+                            .add_sized(
+                                [56.0, 22.0],
+                                egui::Button::new(egui::RichText::new(label).small()),
+                            )
+                            .clicked()
+                        {
+                            s.anim.playing = !s.anim.playing;
+                        }
+                    });
+                }
             });
         });
 }
