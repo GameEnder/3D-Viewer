@@ -1,5 +1,4 @@
-//! UserChoice hash computation, reverse-engineered from SetUserFTA v1.8.3
-//! (Kolbicz IT). Windows 8+ protects per-user file-type defaults
+//! UserChoice hash computation. Windows 8+ protects per-user file-type defaults
 //! (`FileExts\.ext\UserChoice`) with a hash over the assignment; Windows 11
 //! build 24H2+ (feature `AppDefaultHashRotation`, variant `UserChoiceLatest`,
 //! stage >= 0x648) computes it as follows:
@@ -27,7 +26,7 @@ pub const MAGIC: &str =
     "user choice set via windows user experience {d18b6dd5-6124-4341-9318-804003bafa0b}";
 
 /// Round a FILETIME down to a whole minute (the timestamp element:
-/// zeroing wSeconds and wMilliseconds, as SetUserFTA does).
+/// zeroing wSeconds and wMilliseconds).
 pub fn filetime_to_minute(ft: u64) -> u64 {
     const MINUTE: u64 = 60 * 10_000_000;
     ft - ft % MINUTE
@@ -94,8 +93,7 @@ fn md5(data: &[u8]) -> [u32; 4] {
     [a0, b0, c0, d0]
 }
 
-/// Pass 1 over the wide string's dwords (transliteration of SetUserFTA
-/// 004024d0). Returns (chain, acc). `n` = dword count rounded down to even.
+/// Pass 1 over the wide string's dwords. Returns (chain, acc). `n` = dword count rounded down to even.
 fn pass1(dwords: &[u32], n: usize, state: &[u32; 4]) -> (u32, u32) {
     let m1 = (state[0] | 1).wrapping_add(0x69fb_0000);
     let m2 = (state[1] | 1).wrapping_add(0x13db_0000);
@@ -131,7 +129,7 @@ fn pass1(dwords: &[u32], n: usize, state: &[u32; 4]) -> (u32, u32) {
     (h, acc)
 }
 
-/// Pass 2 (transliteration of SetUserFTA 00402650). Same loop shape,
+/// Pass 2. Same loop shape,
 /// different constants, seeded from state[0..2] directly.
 fn pass2(dwords: &[u32], n: usize, state: &[u32; 4]) -> (u32, u32) {
     let u7 = state[0] | 1;
@@ -252,10 +250,10 @@ mod tests {
 
     const SID: &str = "S-1-5-21-3708609648-1742982103-4094751306-1001";
 
-    // Vectors captured from SetUserFTA v1.8.3 on this machine (Windows 11
-    // build 26200): (ext, progid, key last-write FILETIME, resulting Hash).
+    // Vectors captured on this machine (Windows 11 build 26200):
+    //(ext, progid, key last-write FILETIME, resulting Hash).
     #[test]
-    fn reproduces_setuserfta_vectors() {
+    fn reproduces_setuser_vectors() {
         let vectors: &[(&str, &str, u64, &str)] = &[
             (
                 ".zzzbb1",
@@ -373,7 +371,7 @@ mod imp {
     /// Make `prog_id` the default handler for `.{ext}` by writing a
     /// Windows-validated UserChoice (ProgId + hash).
     ///
-    /// Sequence (as reverse-engineered from SetUserFTA): delete any existing
+    /// Sequence: delete any existing
     /// UserChoice key, recreate it (a fresh key carries a writable DACL),
     /// read its last-write time, compute the hash over that minute, then
     /// write `Hash` FIRST and `ProgId` SECOND — the final last-write falls

@@ -23,6 +23,11 @@
 //!   records (real files pack ~500 per range line).
 //! - `.uvst[0].uvsp[a:b]` (modern) / `.uvpt` (older) UV points:
 //!   `-type "float2"` raw ranges, or `"float2Array" <count>` whole-array
+//! - `.pt[a:b]` shape-level vertex TWEAKS (`-type "float3"`): sparse
+//!   vertex-index -> OFFSET added to `.vt` before transforms. Real files
+//!   can park base geometry far from its final place and let the tweak
+//!   array bring it home (the FBX exporter bakes these in, so a loader
+//!   that skips them scatters the model and breaks normalization).
 //! - `.t`/`.r`/`.s` `-type "double3"` transform translate / rotate (Euler
 //!   XYZ, in `currentUnit` angle units — degrees by default) / scale,
 //!   plus `.rp`/`.sp` rotate/scale pivots (default zero). The local
@@ -39,9 +44,13 @@
 //! networks are out of scope).
 //!
 //! Known v1 simplifications (warnings are NOT emitted for these):
-//! rotate-pivot translations (`.rpt`/`.spt`) and non-XYZ rotate orders are
-//! ignored, `rename` after creation is not tracked, references and
-//! instancing are not followed, and only UV set 0 is read.
+//! construction history (polySplit/polyTweak chains feeding a final
+//! `shape` node) is not executed — meshes render from the stored
+//! intermediate base geometry, which matches the visible result up to
+//! split-inserted detail; rotate-pivot translations (`.rpt`/`.spt`) and
+//! non-XYZ rotate orders are ignored; `rename` after creation is not
+//! tracked; references and instancing are not followed; only UV set 0
+//! is read.
 
 use std::path::Path;
 
@@ -91,6 +100,11 @@ struct MaNode {
     faces: Vec<FaceRecord>,
     /// UV points (`.uvst[0].uvsp` / `.uvpt`).
     uvpt: Vec<[f32; 2]>,
+    /// Shape-level vertex tweaks (`.pt[a:b]` float3 ranges): sparse
+    /// vertex index -> OFFSET added to `.vt` (real files park base
+    /// geometry far away and let the tweak array bring it into place —
+    /// the FBX exporter bakes these, so skipping them scatters parts).
+    pt: std::collections::HashMap<usize, [f32; 3]>,
 }
 
 /// One polyFaces face record: (signed 1-based edge refs, per-face-vertex
@@ -112,6 +126,7 @@ impl MaNode {
             ed: vec![],
             faces: vec![],
             uvpt: vec![],
+            pt: std::collections::HashMap::new(),
         }
     }
 }
@@ -329,6 +344,33 @@ fn apply_set_attr(
                     warnings.push(format!("skipping empty polyFaces entry on {attr_path}"));
                 }
                 node.faces.extend(records);
+            }
+            _ => {}
+        },
+        // Shape-level vertex tweaks: `.pt[a:b]` float3 offsets, sparse by
+        // vertex index (typed on the first range, bare continuations).
+        "pt" => match (ty, range) {
+            (Some("float3"), Some(range)) | (None, Some(range)) => {
+                let count = range.1 - range.0 + 1;
+                if values.len() != count * 3 {
+                    return Err(bad(&format!(
+                        "tweak range {}:{} holds {} numbers, expected {}",
+                        range.0,
+                        range.1,
+                        values.len(),
+                        count * 3
+                    )));
+                }
+                for (k, c) in values.as_chunks::<3>().0.iter().enumerate() {
+                    node.pt.insert(
+                        range.0 + k,
+                        [
+                            parse_f64(c[0], "vertex tweak")? as f32,
+                            parse_f64(c[1], "vertex tweak")? as f32,
+                            parse_f64(c[2], "vertex tweak")? as f32,
+                        ],
+                    );
+                }
             }
             _ => {}
         },
@@ -691,10 +733,13 @@ fn build_mesh(node: &MaNode, world: glam::Mat4) -> Result<Mesh, String> {
 
     for (refs, mu) in &node.faces {
         // Oriented vertex chain: the START vertex of each oriented edge.
-        // Edge references (verified against real Maya 2013/2015 exports,
-        // 1806/1806 faces close): positive or zero `k` = edge `k` forward;
-        // negative `-k` = edge `k-1` reversed — so edge 0 reversed is
-        // written as -1, and plain 0 is always edge 0 forward.
+        // Edge references (verified against real Maya 2013/2015 exports by
+        // ring closure, and against an FBX export of the same scene for
+        // winding direction): `k` (>= 0) traverses edge `k` from its stored
+        // END to its START; `-(k+1)` traverses edge `k` from START to END.
+        // (The mirrored reading closes the same rings but flips every
+        // face, which the backface culler eats — the render comparison
+        // against the FBX reference settled the orientation.)
         let mut ring: Vec<usize> = Vec::with_capacity(refs.len());
         for &r in refs {
             let edge_err = |r: i64| {
@@ -704,11 +749,13 @@ fn build_mesh(node: &MaNode, world: glam::Mat4) -> Result<Mesh, String> {
                 )
             };
             let start = if r >= 0 {
+                // Edge r traversed END -> START: ring vertex = END.
                 let e = r as usize;
-                node.ed.get(e).ok_or_else(|| edge_err(r))?.0
-            } else {
-                let e = (r.unsigned_abs() - 1) as usize;
                 node.ed.get(e).ok_or_else(|| edge_err(r))?.1
+            } else {
+                // Edge -r-1 traversed START -> END: ring vertex = START.
+                let e = (r.unsigned_abs() - 1) as usize;
+                node.ed.get(e).ok_or_else(|| edge_err(r))?.0
             };
             ring.push(start);
         }
@@ -732,7 +779,12 @@ fn build_mesh(node: &MaNode, world: glam::Mat4) -> Result<Mesh, String> {
                 face_uvs.get(k + 1).copied().unwrap_or([0.0; 2]),
             ];
             for (vi, uv) in tri.iter().zip(tri_uvs) {
-                let p = node.vt[*vi];
+                let mut p = node.vt[*vi];
+                // Shape-level tweak offsets (`.pt`), applied before the
+                // world transform.
+                if let Some(t) = node.pt.get(vi) {
+                    p = [p[0] + t[0], p[1] + t[1], p[2] + t[2]];
+                }
                 let w = world * glam::Vec4::new(p[0], p[1], p[2], 1.0);
                 positions.push([w.x, w.y, w.z]);
                 uvs.push(uv);
