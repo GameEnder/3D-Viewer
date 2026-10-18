@@ -217,13 +217,14 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
 /// model IS the model our renderer implements; textures route through
 /// `texture_or_magenta` so a broken image never becomes a hard failure.
 ///
-/// Legacy materials using KHR_materials_pbrSpecularGlossiness are
-/// CONVERTED, not approximated: when a specularGlossinessTexture is
-/// present, a per-texel bake solves the metallic-roughness equivalent
-/// (see `bake_spec_gloss`) — a factors-only fallback maps the scalars
-/// through the same solve. Skipping the bake (e.g. using the raw
-/// glossiness factor as roughness) produces near-mirror materials that
-/// blow out under the light rig.
+/// Legacy materials using KHR_materials_pbrSpecularGlossiness are treated
+/// as DIELECTRICS: metallic 0, base color from the diffuse texture/factor,
+/// roughness from the glossiness texture alpha (1 - glossiness). The SG
+/// specular map is NOT converted into metallic — measured on real assets
+/// (Bee.glb) the specular map sits at/below the 4% dielectric F0, and a
+/// metallic solve there renders half the model as dark clamped metal
+/// (the "too dark + orange fringes" bug). Per-texel specular modeling is
+/// documented as future polish.
 fn convert_material(
     mat: &gltf::Material,
     images: &[gltf::image::Data],
@@ -232,21 +233,24 @@ fn convert_material(
     let pbr = mat.pbr_metallic_roughness();
     let mut material = if let Some(sg) = mat.pbr_specular_glossiness() {
         let df = sg.diffuse_factor();
-        let sf = sg.specular_factor();
         let gf = sg.glossiness_factor();
         let diff_src = sg.diffuse_texture().map(|t| t.texture().source());
         let sg_src = sg
             .specular_glossiness_texture()
             .map(|t| t.texture().source());
-        let sf4 = [sf[0], sf[1], sf[2], 1.0];
-        match bake_spec_gloss(diff_src, sg_src, df, sf4, gf, images) {
-            Ok((base, mr)) => Material {
-                // The baked textures carry color/metallic/roughness; the
-                // factors pass them through at 1.0 (alpha keeps the
-                // diffuse factor so alphaMode still works).
-                base_color: [1.0, 1.0, 1.0, df[3]],
-                base_color_texture: Some(base),
-                metallic: 1.0,
+        match bake_spec_gloss(sg_src, gf, images) {
+            Ok(mr) => Material {
+                // Dielectric: the diffuse texture carries the color (the
+                // factor multiplies it in the shader); roughness comes
+                // from the baked glossiness texels.
+                base_color: df,
+                base_color_texture: texture_or_magenta(
+                    diff_src,
+                    images,
+                    warnings,
+                    "diffuseTexture",
+                ),
+                metallic: 0.0,
                 roughness: 1.0,
                 metallic_roughness_texture: Some(mr),
                 ..Material::default_pbr()
@@ -281,9 +285,9 @@ fn convert_material(
     material
 }
 
-/// Factors-only mapping for spec-gloss materials without a
-/// specularGlossinessTexture (or when the bake fails): solve metallic and
-/// roughness from the scalar factors.
+/// Factors-only fallback for spec-gloss materials without a
+/// specularGlossinessTexture: dielectric mapping (metallic 0, roughness
+/// from the glossiness factor).
 fn scalar_spec_gloss(
     pbr: &gltf::material::PbrMetallicRoughness,
     sg: Option<gltf::material::PbrSpecularGlossiness>,
@@ -297,187 +301,52 @@ fn scalar_spec_gloss(
             ..Material::default_pbr()
         };
     };
-    let d = sg.diffuse_factor();
-    let s = sg.specular_factor();
-    let s4 = [s[0], s[1], s[2], 1.0];
-    let m = solve_metallic_channels(d, s4);
-    let b = base_from_diffuse(d, s4, m);
+    let df = sg.diffuse_factor();
     Material {
-        base_color: b,
-        metallic: m,
+        base_color: df,
+        metallic: 0.0,
         roughness: (1.0 - sg.glossiness_factor()).clamp(0.045, 1.0),
         ..Material::default_pbr()
     }
 }
 
-/// sRGB -> linear for one channel.
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// linear -> sRGB for one channel.
-fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// Solve the metallic fraction that reconciles a spec-gloss texel with
-/// the metallic-roughness model. Matching the diffuse term
-/// (`base * (1 - m) = D`) and the specular F0 (`mix(0.04, base, m) = S`)
-/// gives `0.04 m² + (D + S - 0.08) m + (0.04 - S) = 0` per channel;
-/// take the valid root, averaged over RGB. Specular below the 4%
-/// dielectric minimum forces m = 0.
-fn solve_metallic_channels(d: [f32; 4], s: [f32; 4]) -> f32 {
-    const MIN_SPEC: f32 = 0.04;
-    let mut sum = 0.0f32;
-    for c in 0..3 {
-        if s[c] < MIN_SPEC {
-            continue;
-        }
-        let a = MIN_SPEC;
-        let b = d[c] + s[c] - 2.0 * MIN_SPEC;
-        let cc = MIN_SPEC - s[c];
-        let disc = (b * b - 4.0 * a * cc).max(0.0);
-        sum += ((-b + disc.sqrt()) / (2.0 * a)).clamp(0.0, 1.0);
-    }
-    (sum / 3.0).clamp(0.0, 1.0)
-}
-
-/// Diffuse-derived base color: `base = D / (1 - metallic)`, clamped.
-/// Fully metallic texels (division ~0) fall back to the specular color —
-/// for a metal the F0 IS the base color.
-fn base_from_diffuse(d: [f32; 4], s: [f32; 4], m: f32) -> [f32; 4] {
-    if m >= 0.999 {
-        return [
-            s[0].clamp(0.0, 1.0),
-            s[1].clamp(0.0, 1.0),
-            s[2].clamp(0.0, 1.0),
-            d[3],
-        ];
-    }
-    let inv = 1.0 / (1.0 - m);
-    [
-        (d[0] * inv).clamp(0.0, 1.0),
-        (d[1] * inv).clamp(0.0, 1.0),
-        (d[2] * inv).clamp(0.0, 1.0),
-        d[3],
-    ]
-}
-
-/// Per-texel KHR_materials_pbrSpecularGlossiness -> metallic-roughness
-/// bake. Produces the two textures our MR renderer needs:
-///
-/// - base color: `D / (1 - m)` (sRGB-encoded), alpha from the diffuse
-/// - metallic-roughness: G = roughness (1 - glossiness), B = metallic
-///   (linear, matching the glTF MR convention)
-///
-/// The math per texel is `solve_metallic_channels` + `base_from_diffuse`;
-/// all color inputs are sRGB-decoded first, and the baked base color is
-/// re-encoded (our color textures sample as sRGB). Texture sizes may
-/// differ between diffuse and spec-gloss — the output uses the diffuse
-/// grid, nearest-sampling the spec-gloss.
+/// Bake the roughness texture for a spec-gloss material from its
+/// specularGlossinessTexture alpha (glossiness): the output is a glTF
+/// metallic-roughness-convention texture (G = 1 - glossiness, B = 0 —
+/// the material is treated as a dielectric). When no SG texture exists,
+/// a 1x1 texture from the glossiness factor is produced instead.
 fn bake_spec_gloss(
-    diff_src: Option<gltf::Image>,
     sg_src: Option<gltf::Image>,
-    diffuse_factor: [f32; 4],
-    specular_factor: [f32; 4],
     glossiness_factor: f32,
     images: &[gltf::image::Data],
-) -> Result<(Image, Image), String> {
-    let Some(sg_src) = sg_src else {
-        return Err("no specularGlossinessTexture to bake".into());
-    };
-    let sg_img = decode_image(&images[sg_src.index()]).map_err(|e| e.to_string())?;
-    let diff_img = match diff_src {
-        Some(src) => decode_image(&images[src.index()]).ok(),
-        None => None,
-    };
-    // Output grid: the diffuse texture when present, else the SG texture.
-    let (w, h) = diff_img
-        .as_ref()
-        .map(|i| (i.width, i.height))
-        .unwrap_or((sg_img.width, sg_img.height));
-    if w == 0 || h == 0 {
-        return Err("empty spec-gloss texture".into());
-    }
-
-    let mut base_out = vec![0u8; (w * h * 4) as usize];
-    let mut mr_out = vec![0u8; (w * h * 4) as usize];
-    let sample = |img: Option<&Image>, x: u32, y: u32| -> Option<[u8; 4]> {
-        let img = img?;
-        let sx = (x * img.width.max(1) / w.max(1)).min(img.width - 1);
-        let sy = (y * img.height.max(1) / h.max(1)).min(img.height - 1);
-        let o = ((sy * img.width + sx) * 4) as usize;
-        Some([
-            img.rgba[o],
-            img.rgba[o + 1],
-            img.rgba[o + 2],
-            img.rgba[o + 3],
-        ])
-    };
-
-    for y in 0..h {
-        for x in 0..w {
-            let o = ((y * w + x) * 4) as usize;
-            let df = sample(diff_img.as_ref(), x, y);
-            let sg_texel = sample(Some(&sg_img), x, y).unwrap_or([255, 255, 255, 255]);
-            // Diffuse: texture texel (sRGB -> linear) or the factor.
-            let d_lin: [f32; 4] = match df {
-                Some(t) => [
-                    srgb_to_linear(t[0] as f32 / 255.0),
-                    srgb_to_linear(t[1] as f32 / 255.0),
-                    srgb_to_linear(t[2] as f32 / 255.0),
-                    t[3] as f32 / 255.0,
-                ],
-                None => diffuse_factor,
-            };
-            let d = [
-                d_lin[0] * diffuse_factor[0],
-                d_lin[1] * diffuse_factor[1],
-                d_lin[2] * diffuse_factor[2],
-                d_lin[3] * diffuse_factor[3],
-            ];
-            // Specular rgb (sRGB -> linear), glossiness alpha (linear).
-            let s = [
-                srgb_to_linear(sg_texel[0] as f32 / 255.0) * specular_factor[0],
-                srgb_to_linear(sg_texel[1] as f32 / 255.0) * specular_factor[1],
-                srgb_to_linear(sg_texel[2] as f32 / 255.0) * specular_factor[2],
-                1.0,
-            ];
-            let g = (sg_texel[3] as f32 / 255.0 * glossiness_factor).clamp(0.0, 1.0);
-            let m = solve_metallic_channels(d, s);
-            let b = base_from_diffuse(d, s, m);
-            let rough = (1.0 - g).clamp(0.045, 1.0);
-            base_out[o] = (linear_to_srgb(b[0]) * 255.0).round() as u8;
-            base_out[o + 1] = (linear_to_srgb(b[1]) * 255.0).round() as u8;
-            base_out[o + 2] = (linear_to_srgb(b[2]) * 255.0).round() as u8;
-            base_out[o + 3] = (b[3] * 255.0).round() as u8;
-            // MR convention: G = roughness, B = metallic.
-            mr_out[o] = 255;
-            mr_out[o + 1] = (rough * 255.0).round() as u8;
-            mr_out[o + 2] = (m * 255.0).round() as u8;
-            mr_out[o + 3] = 255;
+) -> Result<Image, String> {
+    let (w, h, gloss) = match sg_src {
+        Some(src) => {
+            let sg_img = decode_image(&images[src.index()]).map_err(|e| e.to_string())?;
+            // Per-texel glossiness from the SG alpha channel (linear).
+            let mut rough = vec![255u8; (sg_img.width * sg_img.height * 4) as usize];
+            for o in (1..rough.len()).step_by(4) {
+                let g = sg_img.rgba[o] as f32 / 255.0 * glossiness_factor;
+                rough[o] = ((1.0 - g).clamp(0.045, 1.0) * 255.0).round() as u8;
+            }
+            (sg_img.width, sg_img.height, rough)
         }
-    }
-    Ok((
-        Image {
-            width: w,
-            height: h,
-            rgba: base_out,
-        },
-        Image {
-            width: w,
-            height: h,
-            rgba: mr_out,
-        },
-    ))
+        None => (
+            1,
+            1,
+            vec![
+                255,
+                ((1.0 - glossiness_factor).clamp(0.045, 1.0) * 255.0).round() as u8,
+                0,
+                255,
+            ],
+        ),
+    };
+    Ok(Image {
+        width: w,
+        height: h,
+        rgba: gloss,
+    })
 }
 
 /// Fetch + decode a texture, or substitute a 1x1 magenta placeholder with a
@@ -617,7 +486,7 @@ fn convert_primitive(
     })
 }
 
-/// Read a MAT4 accessor (16 little-endian f32s per matrix) — used for
+/// Read an accessor of MAT4 (16 little-endian f32s per matrix) — used for
 /// skin inverse-bind matrices. Column-major per the glTF spec, which
 /// matches glam's memory layout.
 fn read_mat4s(acc: &gltf::Accessor, buffers: &[BufferData]) -> Result<Vec<glam::Mat4>, LoadError> {

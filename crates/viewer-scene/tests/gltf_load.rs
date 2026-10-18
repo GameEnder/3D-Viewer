@@ -482,32 +482,48 @@ fn loads_skinned_spec_gloss_glb() {
     let path = write_temp("skinned_spec_gloss.glb", &build_skinned_spec_gloss_glb());
     let scene = viewer_scene::load(&path).unwrap();
 
-    // Spec-gloss mapping (factors only, no SG texture -> scalar path):
-    // glossiness 0.8 inverts to roughness 0.2; metallic is SOLVED from
-    // diffuse vs specular factors (specular defaults to white [1,1,1],
-    // which pulls metallic high — physically consistent); base color
-    // derives as diffuse / (1 - metallic). Alpha passes through.
+    // Spec-gloss mapping (factors only, no SG texture -> dielectric
+    // mapping): metallic 0, glossiness 0.8 inverts to roughness 0.2
+    // (baked into the 1x1 MR texture; the factor is a 1.0 pass-through),
+    // diffuse factor passes through as base color.
     let mat = &scene.materials[0];
     assert!(
-        (mat.roughness - 0.2).abs() < 1e-5,
-        "glossiness inverts to roughness: {:?}",
-        mat.roughness
+        mat.metallic == 0.0,
+        "dielectric mapping: {:?}",
+        mat.metallic
     );
     assert!(
-        mat.metallic > 0.0 && mat.metallic < 1.0,
-        "solved metallic in range: {:?}",
+        (mat.roughness - 1.0).abs() < 1e-5,
+        "roughness factor is a pass-through: {:?}",
+        mat.roughness
+    );
+    let mr = mat
+        .metallic_roughness_texture
+        .as_ref()
+        .expect("fallback MR texture");
+    assert!(
+        ((mr.rgba[1] as f32 / 255.0) - 0.2).abs() < 1e-5,
+        "glossiness 0.8 bakes to roughness 0.2: {:?}",
+        mr.rgba
+    );
+    assert!(
+        mat.metallic == 0.0,
+        "dielectric mapping: {:?}",
         mat.metallic
+    );
+    assert!(
+        (mat.base_color[0] - 0.25).abs() < 1e-5 && (mat.base_color[1] - 0.5).abs() < 1e-5,
+        "diffuse factor is the base color: {:?}",
+        mat.base_color
     );
     assert!(
         (mat.base_color[3] - 1.0).abs() < 1e-5,
         "alpha from diffuse factor: {:?}",
         mat.base_color
     );
-    // Base color is diffuse-derived (brighter than the raw factor since
-    // it compensates for the metallic diffuse suppression).
     assert!(
-        mat.base_color[0] >= 0.25 && mat.base_color[0] <= 1.0,
-        "{:?}",
+        (mat.base_color[3] - 1.0).abs() < 1e-5,
+        "alpha from diffuse factor: {:?}",
         mat.base_color
     );
 
