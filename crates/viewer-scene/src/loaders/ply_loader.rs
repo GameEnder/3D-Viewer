@@ -72,6 +72,8 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
         uvs: vec![],
         indices: data.indices,
         material: 0,
+        joints: vec![],
+        weights: vec![],
     };
     // PLY has no hierarchy: one identity node under the scene root.
     let node = scene.add_node(

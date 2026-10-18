@@ -18,6 +18,18 @@ use viewer_scene::{AlphaMode, Image, Scene};
 
 use crate::uniforms::{BARY, MaterialU, Vertex};
 
+/// Per-skinned-mesh attachment: everything the CPU skinning pass needs to
+/// re-derive the triangle soup from the shared vertices each frame. The
+/// soup layout is deterministic (same triangle walk as `upload`), so the
+/// skinning pass re-derives it rather than storing per-corner data.
+pub struct GpuSkin {
+    /// Skin index into `scene.skins`.
+    pub skin_index: usize,
+    /// Per-shared-vertex joint indices and weights (from the CPU Mesh).
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
+}
+
 /// One uploaded mesh: vertex/index buffers plus the draw-time material
 /// slot and per-material flags the render pass sorts on (`blend` meshes
 /// go to the transparent pass, `double_sided` disables backface culling).
@@ -28,6 +40,11 @@ pub struct GpuMesh {
     pub material: usize,
     pub blend: bool, // material alpha_mode == Blend
     pub double_sided: bool,
+    /// Present on skinned meshes: CPU-skinning attachment (see module docs).
+    pub skin: Option<GpuSkin>,
+    /// Index into `scene.meshes` of the CPU mesh this draw was built from
+    /// (the skinning pass reads its shared vertices).
+    pub cpu_mesh: usize,
 }
 
 /// One uploaded material: a ready-to-bind group holding the uniform
@@ -102,6 +119,11 @@ pub fn upload(device: &wgpu::Device, _queue: &wgpu::Queue, scene: Arc<Scene>) ->
             };
             let mut verts = Vec::new();
             let mut indices = Vec::new();
+            // Skinned meshes remember which shared vertex every soup
+            // vertex came from, so the per-frame CPU skinning pass can
+            // rewrite the buffer (positions + normals move; UVs and
+            // barycentrics are per-corner and stay).
+            let skinned = !m.joints.is_empty() && node.skin.is_some();
             for tri in tri_iter {
                 for (k, vi) in tri.iter().enumerate() {
                     verts.push(Vertex {
@@ -113,6 +135,15 @@ pub fn upload(device: &wgpu::Device, _queue: &wgpu::Queue, scene: Arc<Scene>) ->
                     indices.push(indices.len() as u32);
                 }
             }
+            let skin = if skinned {
+                Some(GpuSkin {
+                    skin_index: node.skin.unwrap(),
+                    joints: m.joints.clone(),
+                    weights: m.weights.clone(),
+                })
+            } else {
+                None
+            };
             let mat = scene.materials.get(m.material);
             let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("vertices"),
@@ -131,6 +162,8 @@ pub fn upload(device: &wgpu::Device, _queue: &wgpu::Queue, scene: Arc<Scene>) ->
                 material: m.material,
                 blend: matches!(mat.map(|m| &m.alpha_mode), Some(AlphaMode::Blend)),
                 double_sided: mat.map(|m| m.double_sided).unwrap_or(false),
+                skin,
+                cpu_mesh: mi,
             });
             draws.push((meshes.len() - 1, node_id));
         }

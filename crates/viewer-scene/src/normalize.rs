@@ -127,6 +127,8 @@ mod tests {
             uvs: vec![],
             indices: vec![0, 1, 2, 1, 3, 2],
             material: 0,
+            joints: vec![],
+            weights: vec![],
         }
     }
 
@@ -177,6 +179,8 @@ mod tests {
             uvs: vec![],
             indices: vec![],
             material: 0,
+            joints: vec![],
+            weights: vec![],
         };
         compute_normals(&mut m);
         let n = m.normals[0];

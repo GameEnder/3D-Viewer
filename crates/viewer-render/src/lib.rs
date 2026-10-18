@@ -264,6 +264,9 @@ pub struct Renderer {
     gpu_scene: Option<gpu_scene::GpuScene>,
     queued: Option<FrameParams>,
     pending_screenshot: bool,
+    /// Reused per-frame scratch for the CPU skinning pass (avoids a
+    /// realloc per animated frame on skinned models).
+    skin_scratch: Vec<uniforms::Vertex>,
     screenshot_job: Option<ScreenshotJob>,
     /// One 512² depth map per rig light, indexed like `FrameParams.lights`
     /// (Task 9).
@@ -908,6 +911,7 @@ impl Renderer {
             gpu_scene: None,
             queued: None,
             pending_screenshot: false,
+            skin_scratch: Vec::new(),
             screenshot_job: None,
             shadow_maps,
             dummies,
@@ -1242,6 +1246,67 @@ impl Renderer {
                     normal_mat: normal_matrix(model).to_cols_array_2d(),
                 };
                 queue.write_buffer(&self.model_ub, (slot * 256) as u64, bytemuck::bytes_of(&mu));
+            }
+
+            // Skinned meshes (glTF): re-skin the shared vertices on the CPU
+            // and rewrite the soup into the existing vertex buffer — the
+            // shadow pass, wireframe and everything downstream then see
+            // the same moved geometry with no shader changes. The joint
+            // matrices derive from the SAME animated world transforms
+            // computed above, so node-TRS animation and skinning stay in
+            // lockstep. The soup layout is deterministic (same walk as
+            // gpu_scene::upload), so it is re-derived rather than patched.
+            for gmesh in gs.meshes.iter() {
+                let Some(att) = gmesh.skin.as_ref() else {
+                    continue;
+                };
+                let Some(skin) = gs.scene.skins.get(att.skin_index) else {
+                    continue;
+                };
+                let matrices =
+                    viewer_scene::skinning::joint_matrices_local(skin, &world, gs.scene.root);
+                let cpu_mesh = &gs.scene.meshes[gmesh.cpu_mesh];
+                let (shared_pos, shared_nrm) =
+                    viewer_scene::skinning::skin_mesh(cpu_mesh, &matrices);
+                let has_normals = shared_nrm.len() == shared_pos.len();
+                let triangles: Box<dyn Iterator<Item = [usize; 3]>> = if cpu_mesh.indices.is_empty()
+                {
+                    Box::new((0..shared_pos.len() / 3).map(|t| [t * 3, t * 3 + 1, t * 3 + 2]))
+                } else {
+                    Box::new(
+                        cpu_mesh
+                            .indices
+                            .as_chunks::<3>()
+                            .0
+                            .iter()
+                            .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize]),
+                    )
+                };
+                self.skin_scratch.clear();
+                for tri in triangles {
+                    for (k, vi) in tri.iter().enumerate() {
+                        self.skin_scratch.push(uniforms::Vertex {
+                            pos: shared_pos.get(*vi).copied().unwrap_or([0.0; 3]),
+                            normal: if has_normals {
+                                shared_nrm.get(*vi).copied().unwrap_or([0.0, 1.0, 0.0])
+                            } else {
+                                cpu_mesh
+                                    .normals
+                                    .get(*vi)
+                                    .copied()
+                                    .unwrap_or([0.0, 1.0, 0.0])
+                            },
+                            uv: cpu_mesh.uvs.get(*vi).copied().unwrap_or([0.0, 0.0]),
+                            bary: uniforms::BARY[k],
+                        });
+                    }
+                }
+                let bytes = bytemuck::cast_slice(&self.skin_scratch);
+                // Guard against a re-derived soup mismatching the uploaded
+                // size (would indicate an upload/layout drift bug).
+                if bytes.len() as u64 <= gmesh.vertex_buf.size() {
+                    queue.write_buffer(&gmesh.vertex_buf, 0, bytes);
+                }
             }
 
             // Draw order: opaque first (any order, depth-tested), then the

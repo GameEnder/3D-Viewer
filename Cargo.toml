@@ -12,7 +12,7 @@ egui-wgpu = "0.36"
 fbxcel-dom = "0.0.10"
 maya-mel = "0.1"
 glam = "0.30"
-gltf = "1"
+gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness"] }
 byroredux-nif = { git = "https://github.com/matiaszanolli/ByroRedux", package = "byroredux-nif" }
 tobj = "4"
 image = "0.25"

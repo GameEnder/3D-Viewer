@@ -801,5 +801,7 @@ fn build_mesh(node: &MaNode, world: glam::Mat4) -> Result<Mesh, String> {
         uvs,
         indices: vec![],
         material: 0,
+        joints: vec![],
+        weights: vec![],
     })
 }

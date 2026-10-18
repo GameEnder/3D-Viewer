@@ -93,11 +93,19 @@ pub struct Mesh {
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub material: usize,
+    /// glTF skinning: per-SHARED-VERTEX joint indices into the skin's
+    /// joint list (JOINTS_0). Empty on unskinned meshes.
+    pub joints: Vec<[u16; 4]>,
+    /// glTF skinning: per-shared-vertex joint weights (WEIGHTS_0),
+    /// parallel to `joints`. Empty on unskinned meshes.
+    pub weights: Vec<[f32; 4]>,
 }
 
 /// One transform-hierarchy node. `meshes` holds indices into
 /// `Scene::meshes` — one entry per draw call (glTF primitives, 3MF
-/// material splits, FBX meshes all map onto this).
+/// material splits, FBX meshes all map onto this). `skin` marks the node
+/// as a skinned-mesh holder (glTF): its meshes carry per-vertex joint
+/// indices/weights into `Scene::skins[skin]`.
 #[derive(Clone, Debug)]
 pub struct Node {
     pub name: Option<String>,
@@ -105,6 +113,8 @@ pub struct Node {
     pub parent: Option<usize>,
     pub children: Vec<usize>,
     pub meshes: Vec<usize>, // one draw per entry; glTF primitives map here
+    /// glTF skin index applied to this node's meshes (bind pose without).
+    pub skin: Option<usize>,
 }
 
 /// The whole loaded model. `bounds` is filled by `normalize`, as are
@@ -117,6 +127,9 @@ pub struct Scene {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
     pub animations: Vec<Animation>,
+    /// glTF skins (joint lists + inverse bind matrices); nodes reference
+    /// these via `Node::skin` and meshes via `Mesh::joints`/`weights`.
+    pub skins: Vec<crate::skinning::Skin>,
     pub bounds: Aabb,
     pub warnings: Vec<String>,
     pub source_name: String,
@@ -134,10 +147,12 @@ impl Scene {
                 parent: None,
                 children: vec![],
                 meshes: vec![],
+                skin: None,
             }],
             meshes: vec![],
             materials: vec![],
             animations: vec![],
+            skins: vec![],
             bounds: Aabb {
                 min: Vec3::ZERO,
                 max: Vec3::ZERO,
@@ -158,6 +173,7 @@ impl Scene {
             parent: Some(parent),
             children: vec![],
             meshes: vec![],
+            skin: None,
         });
         self.nodes[parent].children.push(idx);
         idx

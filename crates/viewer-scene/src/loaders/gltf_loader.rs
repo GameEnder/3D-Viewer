@@ -75,6 +75,7 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
         order.push(n);
         queue.extend(children);
     }
+
     // create our nodes in BFS order
     for node in &order {
         let (t, r, s) = node.transform().decomposed();
@@ -117,6 +118,44 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
         }
     }
 
+    // --- skins: collect joint node lists + inverse bind matrices ---
+    // Skins are numbered by document iteration order; nodes reference
+    // them via Node::skin (the glTF node's skin index). A skin whose
+    // joints are not all in the scene graph is skipped with a warning
+    // (rendering it would deform through missing identity joints).
+    {
+        let mut remap: Vec<Option<usize>> = Vec::new();
+        for skin in doc.skins() {
+            let all: Vec<gltf::Node> = skin.joints().collect();
+            let joints: Vec<usize> = all.iter().filter_map(|j| map[j.index()]).collect();
+            if joints.len() != all.len() {
+                scene.warnings.push(format!(
+                    "skin '{}' references nodes outside the scene graph; skipped",
+                    skin.name().unwrap_or("?")
+                ));
+                remap.push(None);
+                continue;
+            }
+            let inverse_bind = match skin.inverse_bind_matrices() {
+                Some(acc) => read_mat4s(&acc, &buffers)?,
+                None => vec![],
+            };
+            scene
+                .skins
+                .push(crate::skinning::Skin::new(joints, inverse_bind));
+            remap.push(Some(scene.skins.len() - 1));
+        }
+        // assign Node::skin through the node map (BFS-created indices)
+        for node in &order {
+            let Some(gskin) = node.skin() else {
+                continue;
+            };
+            let Some(our_idx) = map[node.index()] else {
+                continue;
+            };
+            scene.nodes[our_idx].skin = remap[gskin.index()];
+        }
+    }
     // --- animations ---
     for anim in doc.animations() {
         let mut channels = Vec::new();
@@ -177,23 +216,43 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
 /// Map a glTF PBR material onto ours. Nearly 1:1: glTF's metallic-roughness
 /// model IS the model our renderer implements; textures route through
 /// `texture_or_magenta` so a broken image never becomes a hard failure.
+///
+/// Legacy materials using KHR_materials_pbrSpecularGlossiness map onto
+/// metallic-roughness: diffuseTexture -> base color, diffuseFactor ->
+/// base color, glossiness (1 = smooth) inverts into roughness, metallic
+/// 0. Specular is folded into roughness only via the glossiness factor
+/// (per-texel channel conversion is future polish). The spec-gloss
+/// values win when BOTH models are present, matching exporter intent.
 fn convert_material(
     mat: &gltf::Material,
     images: &[gltf::image::Data],
     warnings: &mut Vec<String>,
 ) -> Material {
     let pbr = mat.pbr_metallic_roughness();
-    let factor = pbr.base_color_factor();
+    let (factor, base_tex, metallic, roughness) = match mat.pbr_specular_glossiness() {
+        Some(sg) => (
+            sg.diffuse_factor(),
+            sg.diffuse_texture().map(|t| t.texture().source()),
+            0.0,
+            (1.0 - sg.glossiness_factor()).clamp(0.05, 1.0),
+        ),
+        None => (
+            pbr.base_color_factor(),
+            pbr.base_color_texture().map(|t| t.texture().source()),
+            pbr.metallic_factor(),
+            pbr.roughness_factor(),
+        ),
+    };
     Material {
         base_color: factor,
         base_color_texture: texture_or_magenta(
-            pbr.base_color_texture().map(|t| t.texture().source()),
+            base_tex,
             images,
             warnings,
-            "baseColorTexture",
+            "diffuse/baseColorTexture",
         ),
-        metallic: pbr.metallic_factor(),
-        roughness: pbr.roughness_factor(),
+        metallic,
+        roughness,
         metallic_roughness_texture: texture_or_magenta(
             pbr.metallic_roughness_texture()
                 .map(|t| t.texture().source()),
@@ -314,6 +373,21 @@ fn convert_primitive(
         .read_indices()
         .map(|r| r.into_u32().collect())
         .unwrap_or_else(|| (0..positions.len() as u32).collect());
+    // Skin binding (JOINTS_0/WEIGHTS_0), per shared vertex. Missing
+    // either half leaves the mesh unskinned (bind pose).
+    let joints: Vec<[u16; 4]> = reader
+        .read_joints(0)
+        .map(|r| r.into_u16().collect())
+        .unwrap_or_default();
+    let weights: Vec<[f32; 4]> = reader
+        .read_weights(0)
+        .map(|r| r.into_f32().collect())
+        .unwrap_or_default();
+    let (joints, weights) = if joints.len() == positions.len() && weights.len() == positions.len() {
+        (joints, weights)
+    } else {
+        (vec![], vec![])
+    };
     // Malformed files can carry an index accessor referencing vertices beyond
     // POSITION — the GPU upload (gpu_scene::upload, m.positions[vi]) and even
     // normalize's bounds pass would panic on it. Reject at load, like the
@@ -340,7 +414,33 @@ fn convert_primitive(
         uvs,
         indices,
         material,
+        joints,
+        weights,
     })
+}
+
+/// Read a MAT4 accessor (16 little-endian f32s per matrix) — used for
+/// skin inverse-bind matrices. Column-major per the glTF spec, which
+/// matches glam's memory layout.
+fn read_mat4s(acc: &gltf::Accessor, buffers: &[BufferData]) -> Result<Vec<glam::Mat4>, LoadError> {
+    if acc.data_type() != DataType::F32 || acc.dimensions() != Dimensions::Mat4 {
+        return Err(LoadError::Parse {
+            format: "glTF",
+            detail: "inverse bind matrices must be f32 MAT4".into(),
+        });
+    }
+    let bytes = accessor_slice(acc, buffers)?;
+    Ok(bytes
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .map(|c| {
+            let f: [f32; 16] = std::array::from_fn(|i| {
+                f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]])
+            });
+            glam::Mat4::from_cols_array(&f)
+        })
+        .collect())
 }
 
 // --- raw accessor helpers (manual decode; no crate-internal APIs) ---

@@ -85,6 +85,8 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
             uvs: mesh.texcoords.as_chunks::<2>().0.to_vec(),
             indices: mesh.indices.clone(),
             material,
+            joints: vec![],
+            weights: vec![],
         });
         scene.nodes[node].meshes.push(our);
     }

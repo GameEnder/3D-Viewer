@@ -426,6 +426,8 @@ fn build_object_meshes(
             uvs: vec![],
             indices: vec![],
             material: default_idx.unwrap_or(0),
+            joints: vec![],
+            weights: vec![],
         });
         return vec![id];
     }
@@ -451,6 +453,8 @@ fn build_object_meshes(
                 uvs: vec![],
                 indices: buckets[&mi].clone(),
                 material: mi,
+                joints: vec![],
+                weights: vec![],
             })
         })
         .collect()

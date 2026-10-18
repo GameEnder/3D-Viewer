@@ -105,6 +105,8 @@ pub fn scene() -> Arc<Scene> {
         uvs: vec![],
         indices: vec![],
         material: 0,
+        joints: vec![],
+        weights: vec![],
     };
     let sphere_base = mesh.positions.len() as u32;
     push_sphere(&mut mesh, [-0.18, 0.42, -0.1], 0.34, 14, 22, sphere_base);

@@ -443,7 +443,7 @@ impl ViewerApp {
         /// One try_recv on the load channel (Task 18: Disconnected is a
         /// loader crash, not just another empty poll).
         enum Poll {
-            Done(Result<viewer_scene::Scene, viewer_scene::LoadError>),
+            Done(Result<Box<viewer_scene::Scene>, viewer_scene::LoadError>),
             Empty,
             /// The worker dropped its sender without ever sending: it died
             /// (panic) mid-load.
@@ -455,7 +455,7 @@ impl ViewerApp {
             .map(std::sync::mpsc::Receiver::try_recv)
         {
             None => Poll::Empty,
-            Some(Ok(result)) => Poll::Done(result),
+            Some(Ok(result)) => Poll::Done(result.map(Box::new)),
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) => Poll::Empty,
             // Ruling (Task 8 review): a disconnected channel without a
             // delivered result means the worker thread crashed — surface it
@@ -472,6 +472,7 @@ impl ViewerApp {
                 self.load_rx = None;
                 match result {
                     Ok(scene) => {
+                        let scene = *scene;
                         self.camera
                             .fit(scene.bounds.center(), scene.bounds.bounding_sphere_radius());
                         // Task 17: every load restarts animation playback from clip

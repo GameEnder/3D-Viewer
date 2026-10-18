@@ -148,6 +148,8 @@ fn load_mesh(
             uvs: Vec::new(),
             indices,
             material: 0,
+            joints: vec![],
+            weights: vec![],
         },
         material,
     ))

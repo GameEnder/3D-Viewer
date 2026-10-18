@@ -409,3 +409,193 @@ fn rejects_cubicspline_output_not_packed_in_threes() {
         "must name the output element count: {msg}"
     );
 }
+/// Minimal skinned + spec-gloss GLB: a joint node animated along x, a
+/// skinned mesh node holding one triangle bound 100% to that joint, and
+/// a KHR_materials_pbrSpecularGlossiness material with a diffuse factor
+/// (verifies the extension mapping without needing a real image).
+fn build_skinned_spec_gloss_glb() -> Vec<u8> {
+    let positions: Vec<f32> = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let normals: Vec<f32> = vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    let indices: Vec<u16> = vec![0, 1, 2];
+    let joints: Vec<u16> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let weights: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let times: Vec<f32> = vec![0.0, 1.0];
+    let translations: Vec<f32> = vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+    let ibm: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+
+    // Pack the binary chunk, recording (offset, length) per buffer view.
+    let mut bin: Vec<u8> = Vec::new();
+    let mut views: Vec<(usize, usize)> = Vec::new();
+    fn bytes_of<T>(v: &[T]) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+    }
+    for data in [
+        bytes_of(&positions),
+        bytes_of(&normals),
+        bytes_of(&indices),
+        bytes_of(&joints),
+        bytes_of(&weights),
+        bytes_of(&times),
+        bytes_of(&translations),
+        bytes_of(&ibm),
+    ] {
+        views.push((bin.len(), data.len()));
+        bin.extend_from_slice(data);
+        let pad = (4 - data.len() % 4) % 4;
+        bin.extend(std::iter::repeat_n(0u8, pad));
+    }
+    let vs: Vec<String> = views
+        .iter()
+        .map(|(off, len)| format!(r#"{{"buffer":0,"byteOffset":{off},"byteLength":{len}}}"#))
+        .collect();
+
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"extensionsUsed":["KHR_materials_pbrSpecularGlossiness"],"scene":0,"scenes":[{{"nodes":[0,1]}}],"nodes":[{{"mesh":0,"skin":0,"name":"bee"}},{{"name":"joint_root","children":[2]}},{{"name":"joint"}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"JOINTS_0":3,"WEIGHTS_0":4}},"indices":2,"material":0}}]}}],"materials":[{{"extensions":{{"KHR_materials_pbrSpecularGlossiness":{{"diffuseFactor":[0.25,0.5,0.75,1.0],"glossinessFactor":0.8}}}}}}],"skins":[{{"joints":[2],"inverseBindMatrices":7}}],"animations":[{{"channels":[{{"sampler":0,"target":{{"node":2,"path":"translation"}}}}],"samplers":[{{"input":5,"interpolation":"LINEAR","output":6}}]}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]}},{{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}},{{"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"}},{{"bufferView":3,"componentType":5123,"count":3,"type":"VEC4"}},{{"bufferView":4,"componentType":5126,"count":3,"type":"VEC4"}},{{"bufferView":5,"componentType":5126,"count":2,"type":"SCALAR","max":[1.0]}},{{"bufferView":6,"componentType":5126,"count":2,"type":"VEC3"}},{{"bufferView":7,"componentType":5126,"count":1,"type":"MAT4"}}],"bufferViews":[{}],"buffers":[{{"byteLength":{}}}]}}"#,
+        vs.join(","),
+        bin.len(),
+    );
+
+    let json_bytes = json.as_bytes().to_vec();
+    let pad_json = (4 - json_bytes.len() % 4) % 4;
+    let pad_bin = (4 - bin.len() % 4) % 4;
+    let total = 12 + 8 + json_bytes.len() + pad_json + 8 + bin.len() + pad_bin;
+
+    let mut glb: Vec<u8> = Vec::new();
+    glb.extend_from_slice(&0x46546C67u32.to_le_bytes());
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    glb.extend_from_slice(&(total as u32).to_le_bytes());
+    glb.extend_from_slice(&((json_bytes.len() + pad_json) as u32).to_le_bytes());
+    glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+    glb.extend_from_slice(&json_bytes);
+    glb.extend(std::iter::repeat_n(b' ', pad_json));
+    glb.extend_from_slice(&((bin.len() + pad_bin) as u32).to_le_bytes());
+    glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+    glb.extend_from_slice(&bin);
+    glb.extend(std::iter::repeat_n(0u8, pad_bin));
+    glb
+}
+
+#[test]
+fn loads_skinned_spec_gloss_glb() {
+    let path = write_temp("skinned_spec_gloss.glb", &build_skinned_spec_gloss_glb());
+    let scene = viewer_scene::load(&path).unwrap();
+
+    // Spec-gloss mapping: diffuseFactor -> base color, glossiness 0.8 ->
+    // roughness 0.2, metallic 0.
+    let mat = &scene.materials[0];
+    assert!(
+        (mat.base_color[0] - 0.25).abs() < 1e-5,
+        "{:?}",
+        mat.base_color
+    );
+    assert!(
+        (mat.base_color[1] - 0.5).abs() < 1e-5,
+        "{:?}",
+        mat.base_color
+    );
+    assert!(
+        (mat.base_color[2] - 0.75).abs() < 1e-5,
+        "{:?}",
+        mat.base_color
+    );
+    assert!(
+        (mat.roughness - 0.2).abs() < 1e-5,
+        "glossiness inverts to roughness"
+    );
+    assert!(mat.metallic == 0.0, "spec-gloss maps to metallic 0");
+
+    // Skin extraction: one skin, one joint (node index of "joint"), and
+    // the mesh carries per-vertex bindings.
+    assert_eq!(scene.skins.len(), 1, "one skin");
+    assert_eq!(scene.skins[0].joints.len(), 1, "one joint");
+    let joint_node = scene.skins[0].joints[0];
+    assert_eq!(scene.nodes[joint_node].name.as_deref(), Some("joint"));
+    assert_eq!(scene.skins[0].inverse_bind.len(), 1);
+    // The bee node holds the skin reference.
+    let bee = scene
+        .nodes
+        .iter()
+        .find(|n| n.name.as_deref() == Some("bee"))
+        .expect("bee node");
+    assert_eq!(bee.skin, Some(0));
+    // Mesh carries JOINTS_0/WEIGHTS_0 parallel to positions.
+    let mesh = &scene.meshes[bee.meshes[0]];
+    assert_eq!(mesh.positions.len(), 3);
+    assert_eq!(mesh.joints.len(), 3);
+    assert_eq!(mesh.weights.len(), 3);
+    assert_eq!(mesh.joints[0], [0, 0, 0, 0]);
+    assert!(
+        (mesh.weights[0][0] - 1.0).abs() < 1e-5,
+        "fully bound to joint 0"
+    );
+
+    // Animation: one channel targeting the joint's translation.
+    assert_eq!(scene.animations.len(), 1);
+    assert_eq!(scene.animations[0].channels.len(), 1);
+    let ch = &scene.animations[0].channels[0];
+    assert_eq!(ch.node, joint_node, "channel targets the joint node");
+
+    // The skin deforms: bind pose is identity, t=0.5 moves verts by +1 x.
+    // joint_matrices_local strips the root/normalize transform (the
+    // renderer applies it via the model matrix), matching the renderer's
+    // skinning pass exactly.
+    let world = viewer_scene::world_transforms(&scene, &[]);
+    let mats = viewer_scene::skinning::joint_matrices_local(&scene.skins[0], &world, scene.root);
+    let (pos, _) = viewer_scene::skinning::skin_mesh(mesh, &mats);
+    for (got, want) in pos.iter().zip(mesh.positions.iter()) {
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert!((g - w).abs() < 1e-5, "bind pose: {pos:?}");
+        }
+    }
+    let overrides = viewer_scene::evaluate(&scene, 0, 0.5);
+    let world = viewer_scene::world_transforms(&scene, &overrides);
+    let mats = viewer_scene::skinning::joint_matrices_local(&scene.skins[0], &world, scene.root);
+    let (pos, _) = viewer_scene::skinning::skin_mesh(mesh, &mats);
+    assert!((pos[0][0] - 1.0).abs() < 1e-5, "{pos:?}"); // 0 + lerp(0,2,0.5)
+    assert!((pos[1][0] - 2.0).abs() < 1e-5, "{pos:?}"); // 1 + 1
+}
+
+/// Field verification against the real Bee.glb (author's Desktop;
+/// auto-skips when absent): 107-joint skeleton, 3 animation clips, and
+/// spec-gloss materials whose diffuse textures must land in
+/// base_color_texture.
+#[test]
+fn loads_real_bee_glb() {
+    let p = std::path::Path::new(r"C:\Users\Steven\Desktop\Bee.glb");
+    if !p.exists() {
+        eprintln!("skipping: Bee.glb absent");
+        return;
+    }
+    let scene = viewer_scene::load(p).unwrap();
+    eprintln!(
+        "Bee.glb: {} meshes, {} skins, {} animations, {} tris, warnings {:?}",
+        scene.meshes.len(),
+        scene.skins.len(),
+        scene.animations.len(),
+        scene.tri_count,
+        scene.warnings
+    );
+    assert_eq!(scene.skins.len(), 1, "one skin");
+    assert_eq!(scene.skins[0].joints.len(), 107, "107 joints");
+    assert_eq!(scene.animations.len(), 3, "3 clips");
+    assert!(
+        scene.animations.iter().any(|a| a.name.contains("idle")),
+        "clip names: {:?}",
+        scene.animations.iter().map(|a| &a.name).collect::<Vec<_>>()
+    );
+    // The mesh is skinned: joints/weights parallel to positions.
+    let mesh = &scene.meshes[0];
+    assert!(!mesh.joints.is_empty(), "mesh carries JOINTS_0");
+    assert_eq!(mesh.joints.len(), mesh.positions.len());
+    assert_eq!(mesh.weights.len(), mesh.positions.len());
+    // Spec-gloss mapped: base color texture present (the bee's diffuse).
+    assert!(
+        scene
+            .materials
+            .iter()
+            .any(|m| m.base_color_texture.is_some()),
+        "at least one material has the diffuse texture"
+    );
+}

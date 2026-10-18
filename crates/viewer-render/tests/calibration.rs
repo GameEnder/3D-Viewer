@@ -63,6 +63,8 @@ fn tiny_scene() -> Arc<viewer_scene::Scene> {
         uvs: vec![],
         indices: vec![0, 1, 2],
         material: 0,
+        joints: vec![],
+        weights: vec![],
     };
     let node = scene.add_node(scene.root, viewer_scene::Trs::identity(), None);
     let mi = scene.add_mesh(mesh);
@@ -95,6 +97,8 @@ fn big_triangle_scene() -> Arc<viewer_scene::Scene> {
         uvs: vec![],
         indices: vec![0, 1, 2],
         material: 0,
+        joints: vec![],
+        weights: vec![],
     };
     let node = scene.add_node(scene.root, viewer_scene::Trs::identity(), None);
     let mi = scene.add_mesh(mesh);
@@ -138,6 +142,8 @@ fn dense_grid_scene(n: u32) -> Arc<viewer_scene::Scene> {
         uvs: vec![],
         indices,
         material: 0,
+        joints: vec![],
+        weights: vec![],
     };
     let node = scene.add_node(scene.root, viewer_scene::Trs::identity(), None);
     let mi = scene.add_mesh(mesh);

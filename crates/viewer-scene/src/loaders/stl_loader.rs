@@ -51,6 +51,8 @@ pub fn load(path: &Path) -> Result<Scene, LoadError> {
         uvs: vec![],
         indices: vec![],
         material: 0,
+        joints: vec![],
+        weights: vec![],
     };
     // STL has no hierarchy; everything hangs off one identity node.
     let node = scene.add_node(

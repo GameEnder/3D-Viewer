@@ -300,6 +300,8 @@ fn finish_mesh(
         uvs,
         indices,
         material: 0,
+        joints: vec![],
+        weights: vec![],
     })
 }
 
