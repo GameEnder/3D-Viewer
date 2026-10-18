@@ -1239,8 +1239,19 @@ impl Renderer {
                 Mat4::IDENTITY
             };
             let xform = scale * spin;
-            for (slot, (_mesh_idx, node_idx)) in gs.draws.iter().enumerate() {
-                let model = xform * world[*node_idx];
+            for (slot, (mesh_idx, node_idx)) in gs.draws.iter().enumerate() {
+                // glTF spec: a skinned mesh's NODE transform is ignored —
+                // the joint chain (applied by the skinning pass below)
+                // defines the vertex positions in pre-root world space.
+                // The model matrix for skinned draws is therefore just
+                // the root/normalize transform, NOT world[node] (which
+                // would double-apply the mesh node's own transform, e.g.
+                // the bee's cm->m scale 0.01 — shrinking the model 100x).
+                let model = if gs.meshes[*mesh_idx].skin.is_some() {
+                    xform * world[gs.scene.root]
+                } else {
+                    xform * world[*node_idx]
+                };
                 let mu = ModelU {
                     model: model.to_cols_array_2d(),
                     normal_mat: normal_matrix(model).to_cols_array_2d(),
