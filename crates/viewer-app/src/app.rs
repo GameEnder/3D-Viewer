@@ -207,8 +207,8 @@ impl ViewerApp {
                                 ground: true,
                                 grid: false,
                                 bloom: false,
-                                exposure: 0.5,
-                                contrast: 1.66,
+                                exposure: 1.0,
+                                contrast: 1.0,
                                 ground_opacity: 0.4,
                                 shadows: true,
                             },
@@ -249,8 +249,8 @@ impl ViewerApp {
             turntable_speed: 30.0,
             rot_offset_deg: 0.0,
             model_scale: 1.0,
-            exposure: 0.5,
-            contrast: 1.66,
+            exposure: 1.0,
+            contrast: 1.0,
             anim: panels::AnimationState::default(),
             note: None,
             about_open: false,
@@ -311,8 +311,8 @@ impl ViewerApp {
         self.ground = true;
         self.grid = true;
         self.bloom = true;
-        self.exposure = 0.5;
-        self.contrast = 1.66;
+        self.exposure = 1.0;
+        self.contrast = 1.0;
         self.rig_rot_deg = 0.0;
         self.light_color_override = [None; 3];
         self.env_color_override = None;
@@ -935,8 +935,8 @@ mod tests {
             turntable_speed: 30.0,
             rot_offset_deg: 0.0,
             model_scale: 1.0,
-            exposure: 0.5,
-            contrast: 1.66,
+            exposure: 1.0,
+            contrast: 1.0,
             anim: panels::AnimationState::default(),
             note: None,
             about_open: false,
@@ -1036,8 +1036,8 @@ mod tests {
         assert!(s.ground);
         assert!(s.grid);
         assert!(s.bloom);
-        assert_eq!(s.exposure, 0.5);
-        assert_eq!(s.contrast, 1.66);
+        assert_eq!(s.exposure, 1.0);
+        assert_eq!(s.contrast, 1.0);
         assert_eq!(s.ground_opacity, 0.4);
     }
 
@@ -1058,7 +1058,7 @@ mod tests {
     }
 
     /// Task 13 panel defaults: 30 deg/s turntable (12 s/rev), no rotation
-    /// offset, scale 1, FOV 45, exposure 0.5, contrast 1.66.
+    /// offset, scale 1, FOV 45, exposure 1, contrast 1.
     #[test]
     fn turntable_and_camera_defaults_match_the_brief() {
         let app = test_app();
@@ -1066,8 +1066,8 @@ mod tests {
         assert_eq!(app.rot_offset_deg, 0.0);
         assert_eq!(app.model_scale, 1.0);
         assert_eq!(app.camera.fov_y_deg, 45.0);
-        assert_eq!(app.exposure, 0.5);
-        assert_eq!(app.contrast, 1.66);
+        assert_eq!(app.exposure, 1.0);
+        assert_eq!(app.contrast, 1.0);
     }
 
     /// Turntable advance: 30 deg/s, dt clamped to 0.1 s (a stalled frame

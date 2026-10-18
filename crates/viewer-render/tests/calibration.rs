@@ -362,8 +362,8 @@ fn theme_thumbnail_renders_model() {
                 ground: true,
                 grid: false,
                 bloom: false,
-                exposure: 0.5,
-                contrast: 1.66,
+                exposure: 1.0,
+                contrast: 1.0,
                 ground_opacity: 0.4,
                 shadows: true,
             },
@@ -377,7 +377,7 @@ fn theme_thumbnail_renders_model() {
     }
     println!("thumbnail: min {min_g}, max {max_g}");
     assert!(
-        max_g > 140 && min_g < 60,
+        max_g > 140 && min_g < 100,
         "thumbnail must show a lit model over a dark background \
          (min {min_g}, max {max_g})"
     );

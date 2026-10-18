@@ -6,8 +6,8 @@
 //   group 2: 0 model uniform (dynamic offset)
 //
 // Tuning constants hardcoded here — keep in sync with the named consts in
-// crates/viewer-render/src/lib.rs: LIGHT_SCALE = 1.85 (shade_light radiance),
-// ENV_SCALE = 0.35 (fs_main env term).
+// crates/viewer-render/src/lib.rs: LIGHT_SCALE = 5.18 (shade_light radiance),
+// ENV_SCALE = 2.1 (fs_main env term).
 
 struct Globals {
   view_proj: mat4x4<f32>,
@@ -115,7 +115,7 @@ fn shade_light(light: Light, sp: vec3<f32>, shadow_tex: u32, albedo: vec3<f32>, 
   if (n_dot_l <= 0.0) { return vec3<f32>(0.0); }
   let vis = shadow_factor(shadow_tex, sp);
   if (vis <= 0.0) { return vec3<f32>(0.0); }
-  let radiance = light.color.rgb * light.pos.w * 1.85 / (dist * dist + 1.0); // LIGHT_SCALE=1.85
+  let radiance = light.color.rgb * light.pos.w * 5.18 / (dist * dist + 1.0); // LIGHT_SCALE=5.18
   let H = normalize(V + Ldir);
   let n_dot_h = max(dot(N, H), 0.0);
   let n_dot_v = max(dot(N, V), 1e-4);
@@ -168,7 +168,7 @@ fn fs_main(f: VOut) -> @location(0) vec4<f32> {
   let V = normalize(G.camera_pos.xyz - f.world);
   let albedo = base.rgb;
   let f0 = mix(vec3<f32>(0.04), albedo, metallic);
-  var col = albedo * G.env_color.rgb * G.env_color.w * 0.35; // ENV_SCALE=0.35
+  var col = albedo * G.env_color.rgb * G.env_color.w * 2.1; // ENV_SCALE=2.1
   col += shade_light(L[0], f.sp0, 0u, albedo, f0, rough, N, V, f.world);
   col += shade_light(L[1], f.sp1, 1u, albedo, f0, rough, N, V, f.world);
   col += shade_light(L[2], f.sp2, 2u, albedo, f0, rough, N, V, f.world);
