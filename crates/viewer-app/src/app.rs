@@ -68,9 +68,8 @@ pub struct ViewerApp {
     /// User per-light intensity multipliers (panel drags, 0..3).
     light_mult: [f32; 3],
     /// User environment intensity multiplier (panel drag, 0..3). Default
-    /// 0.5 — calibrated against the original's shadow fill for textured
-    /// models after the ENV_SCALE raise (see viewer-render LIGHT_SCALE
-    /// docs).
+    /// 0.2 — user-calibrated across tested models after the ENV_SCALE
+    /// raise (see viewer-render LIGHT_SCALE docs).
     env_mult: f32,
     /// App-level shadow override: when off, every light's `shadows` is
     /// forced false regardless of theme intensity.
@@ -241,7 +240,7 @@ impl ViewerApp {
             theme_thumbs,
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],
-            env_mult: 0.5,
+            env_mult: 0.2,
             shadows_enabled: true,
             wireframe: false,
             ground: true,
@@ -308,7 +307,7 @@ impl ViewerApp {
     fn reset_all_settings(&mut self) {
         self.theme_idx = 0;
         self.light_mult = [1.0; 3];
-        self.env_mult = 0.5;
+        self.env_mult = 0.2;
         self.shadows_enabled = true;
         self.wireframe = false;
         self.ground = true;
@@ -927,7 +926,7 @@ mod tests {
             theme_thumbs: Vec::new(),
             thumb_textures: Vec::new(),
             light_mult: [1.0; 3],
-            env_mult: 0.5,
+            env_mult: 0.2,
             shadows_enabled: true,
             wireframe: false,
             ground: true,

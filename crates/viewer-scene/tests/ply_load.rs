@@ -97,7 +97,7 @@ fn loads_ascii_ply_with_colors_and_normals() {
     assert_eq!(s.meshes[0].positions.len(), 4);
     assert_eq!(s.tri_count, 2); // quad → 2 tris via fan
     assert_eq!(s.meshes[0].normals[0], [0.0, 0.0, 1.0]);
-    assert!((s.materials[0].base_color[0] - 1.0).abs() < 1e-3); // red 255 → linear ≈ 1.0
+    assert!((s.materials[0].base_color[0] - 0.5).abs() < 1e-3); // red 255 -> linear 1.0, brightness-capped at 0.5
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn loads_binary_little_endian_ply() {
     assert_eq!(s.meshes[0].positions[1], [1.0, 0.0, 0.0]);
     assert_eq!(s.meshes[0].positions[2], [0.0, 1.0, 0.0]);
     assert_eq!(s.tri_count, 1);
-    assert!((s.materials[0].base_color[0] - 1.0).abs() < 1e-3); // red 255 → linear ≈ 1.0
+    assert!((s.materials[0].base_color[0] - 0.5).abs() < 1e-3); // red 255 -> linear 1.0, brightness-capped at 0.5
     assert!(s.materials[0].base_color[1].abs() < 1e-6);
 }
 
@@ -124,7 +124,7 @@ fn ply_without_color_properties_uses_default_material() {
     std::fs::write(&p, ASCII_PLY_NO_COLORS).unwrap();
     let s = viewer_scene::load(&p).unwrap();
     assert_eq!(s.tri_count, 1);
-    assert_eq!(s.materials[0].base_color, [0.8, 0.8, 0.8, 1.0]);
+    assert_eq!(s.materials[0].base_color, [0.5, 0.5, 0.5, 1.0]); // brightness-normalized
 }
 
 // f64::MAX (0x7FEFFFFFFFFFFFFF) little-endian: parses as a garbage list count

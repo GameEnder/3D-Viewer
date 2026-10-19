@@ -72,7 +72,11 @@ fn loads_minimal_3mf_one_triangle_red_base_material() {
     assert_eq!(s.tri_count, 1);
     // base material #FF0000 → linear red, fully opaque
     let bc = s.materials[0].base_color;
-    assert!((bc[0] - 1.0).abs() < 1e-6, "r = {}", bc[0]);
+    assert!(
+        (bc[0] - 0.5).abs() < 1e-6,
+        "r = {} (brightness-capped)",
+        bc[0]
+    );
     assert_eq!(bc[1], 0.0);
     assert_eq!(bc[2], 0.0);
     assert_eq!(bc[3], 1.0);
@@ -140,8 +144,8 @@ fn multi_object_build_with_pid_p1_material_mapping() {
     assert_eq!(s.nodes[s.root].children.len(), 2);
     // one material per base, no extra default (every triangle is mapped)
     assert_eq!(s.materials.len(), 2);
-    assert!((s.materials[0].base_color[0] - 1.0).abs() < 1e-6);
-    assert!((s.materials[1].base_color[1] - 1.0).abs() < 1e-6);
+    assert!((s.materials[0].base_color[0] - 0.5).abs() < 1e-6);
+    assert!((s.materials[1].base_color[1] - 0.5).abs() < 1e-6);
     assert_eq!(s.meshes[0].material, 0); // p1=0 → red
     assert_eq!(s.meshes[1].material, 1); // p1=1 → green
     assert_eq!(s.tri_count, 2);
@@ -185,7 +189,7 @@ fn two_items_instancing_same_object_share_one_mesh() {
     assert_eq!(s.nodes[s.nodes[s.root].children[1]].meshes, [0]);
     // no basematerials → single default material
     assert_eq!(s.materials.len(), 1);
-    assert_eq!(s.materials[0].base_color, [0.8, 0.8, 0.8, 1.0]);
+    assert_eq!(s.materials[0].base_color, [0.5, 0.5, 0.5, 1.0]);
     assert_eq!(s.tri_count, 1);
 }
 
@@ -247,15 +251,15 @@ fn colors_rgb3_rrggbbaa_and_alpha_blend() {
     let p = dir.join("colors.3mf");
     write_zip(&p, "3D/3dmodel.model", MODEL_COLORS);
     let s = viewer_scene::load(&p).unwrap();
-    // #F00 expands to #FF0000 → linear red, opaque
-    assert_eq!(s.materials[0].base_color[0], 1.0);
+    // #F00 expands to #FF0000 → linear red, opaque (brightness-capped 0.5)
+    assert_eq!(s.materials[0].base_color[0], 0.5);
     assert_eq!(s.materials[0].base_color[3], 1.0);
     assert!(matches!(
         s.materials[0].alpha_mode,
         viewer_scene::AlphaMode::Opaque
     ));
     // #00FF0080: alpha 0x80 = 128/255 → opacity in base_color[3], AlphaMode::Blend
-    assert!((s.materials[1].base_color[1] - 1.0).abs() < 1e-6);
+    assert!((s.materials[1].base_color[1] - 0.5).abs() < 1e-6);
     assert!((s.materials[1].base_color[3] - 128.0 / 255.0).abs() < 1e-6);
     assert!(matches!(
         s.materials[1].alpha_mode,
@@ -411,7 +415,7 @@ fn malformed_displaycolor_warns_and_uses_default_color() {
     let p = dir.join("bad-color.3mf");
     write_zip(&p, "3D/3dmodel.model", &model);
     let s = viewer_scene::load(&p).unwrap();
-    assert_eq!(s.materials[0].base_color, [0.8, 0.8, 0.8, 1.0]);
+    assert_eq!(s.materials[0].base_color, [0.5, 0.5, 0.5, 1.0]);
     assert!(
         s.warnings
             .iter()
