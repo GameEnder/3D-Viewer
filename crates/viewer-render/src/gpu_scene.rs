@@ -225,7 +225,13 @@ pub fn upload_materials(
             // glTF color textures are sRGB-encoded; MR/normal maps are data.
             // Absent textures share the renderer's 1x1 fallback views.
             let base = match &m.base_color_texture {
-                Some(img) => upload_texture(device, queue, Some(img), [255, 255, 255, 255], true),
+                // NAIVE albedo: base-color textures sample as LINEAR (no
+                // sRGB decode). The original viewer renders albedo this
+                // way, and the compressed bright-end is what keeps both
+                // dark models (bee) and bright models (plant) in range —
+                // sRGB-decoding expands the albedo range and blows out
+                // bright materials. See LIGHT_SCALE docs.
+                Some(img) => upload_texture(device, queue, Some(img), [255, 255, 255, 255], false),
                 None => res.fallback_base.clone(),
             };
             let mr = match &m.metallic_roughness_texture {

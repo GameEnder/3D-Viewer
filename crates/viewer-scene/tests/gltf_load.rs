@@ -194,7 +194,9 @@ fn loads_glb_mesh_material_animation() {
     assert_eq!(scene.meshes.len(), 1);
     assert_eq!(scene.meshes[0].positions.len(), 8);
     assert_eq!(scene.meshes[0].indices.len(), 36);
-    assert_eq!(scene.materials[0].base_color, [1.0, 0.0, 0.0, 1.0]);
+    // Base color is brightness-normalized (max component capped at 0.5):
+    // the raw red factor (1,0,0) lands at (0.5,0,0) — hue preserved.
+    assert_eq!(scene.materials[0].base_color, [0.5, 0.0, 0.0, 1.0]);
     assert!(matches!(
         scene.materials[0].alpha_mode,
         viewer_scene::AlphaMode::Mask(c) if (c - 0.4).abs() < 1e-6
@@ -512,8 +514,9 @@ fn loads_skinned_spec_gloss_glb() {
         mat.metallic
     );
     assert!(
-        (mat.base_color[0] - 0.25).abs() < 1e-5 && (mat.base_color[1] - 0.5).abs() < 1e-5,
-        "diffuse factor is the base color: {:?}",
+        (mat.base_color[0] - 1.0 / 6.0).abs() < 1e-5
+            && (mat.base_color[1] - 1.0 / 3.0).abs() < 1e-5,
+        "diffuse factor normalized to the 0.5 cap: {:?}",
         mat.base_color
     );
     assert!(

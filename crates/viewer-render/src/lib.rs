@@ -49,19 +49,19 @@ use uniforms::{BgU, GlobalsU, LIGHT_COUNT, LightU, MaterialU, ModelU, PostU, Sha
 
 /// Light intensity multiplier — the theme's normalized intensity (100 = 1.0)
 /// is multiplied by this before reaching the shader. Keep in sync with
-/// shaders/pbr.wgsl (* 5.18 in shade_light) — ground.wgsl keeps its own
+/// shaders/pbr.wgsl (* 2.2 in shade_light) — ground.wgsl keeps its own
 /// separately-calibrated copy (its pool gate stays at the original's
 /// measured ~119/255). Recalibrated for the MODEL look against the
 /// original app (lit fur ~195, shadow belly ~100 encoded) via
 /// tests/bee_light_tune.rs; history: 8.0 pre-calibration, 1.85 (ground
 /// calibration), 5.18 (model fill calibration).
-pub const LIGHT_SCALE: f32 = 5.18;
+pub const LIGHT_SCALE: f32 = 2.2;
 /// Environment (ambient) scale: contribution = albedo * env_color *
 /// env_intensity * ENV_SCALE. Keep in sync with shaders/pbr.wgsl (`* 2.1`
 /// in `fs_main`). Raised alongside LIGHT_SCALE to lift the model's
 /// shadow-side fill to the original's level (uniform ambient; the
 /// ground.wgsl env keeps its own 0.35).
-pub const ENV_SCALE: f32 = 2.1;
+pub const ENV_SCALE: f32 = 0.9;
 /// The PBR pass clears the HDR buffer with it (alpha 0 marker); ground.wgsl
 /// also uses it as the blend reference for its rim fade. The VISIBLE
 /// background is the radial gradient below (Task 18b) - this flat color only

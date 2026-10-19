@@ -64,6 +64,26 @@ pub fn normalize(scene: &mut Scene) {
     for mesh in &mut scene.meshes {
         compute_normals(mesh);
     }
+    // Material brightness normalization: flat-color (untextured) materials
+    // with bright albedos saturate under the light rig — the whole model
+    // renders flat white and the shading gradients disappear. Scale each
+    // untextured material's base color so its max component is <= 0.5
+    // (textured materials are untouched: their texture provides the
+    // visual range). Mirrors the original viewer's compressed look for
+    // legacy FBX/MA materials.
+    for mat in &mut scene.materials {
+        if mat.base_color_texture.is_none() {
+            let max_c = mat.base_color[0]
+                .max(mat.base_color[1])
+                .max(mat.base_color[2]);
+            if max_c > 0.5 {
+                let s = 0.5 / max_c;
+                mat.base_color[0] *= s;
+                mat.base_color[1] *= s;
+                mat.base_color[2] *= s;
+            }
+        }
+    }
     // fold meshes under their node world transforms:
     let world = world_transforms(scene, &[]);
     let mut all = Vec::new();

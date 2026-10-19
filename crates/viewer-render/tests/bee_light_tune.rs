@@ -35,14 +35,14 @@ fn bee_lighting_fill_search() {
     // fur ≈ 200 encoded, shadow belly ≈ 95-105, while the ground pool
     // stays ≈ 119 (the original-measured calibration).
     let candidates: [(f32, f32, f32, f32); 8] = [
-        (1.0, 1.0, 0.5, 1.66), // current defaults
-        (3.0, 6.0, 1.0, 1.0),
-        (3.2, 6.0, 1.0, 1.0),
-        (3.4, 6.0, 1.0, 1.0),
-        (3.2, 5.5, 1.0, 1.0),
-        (3.2, 5.0, 1.0, 1.0),
-        (3.6, 6.0, 1.0, 1.0),
-        (3.4, 5.5, 1.0, 1.0),
+        (1.0, 1.0, 1.0, 1.0), // new-constant defaults (naive albedo)
+        (1.3, 1.3, 1.0, 1.0),
+        (1.5, 1.5, 1.0, 1.0),
+        (1.8, 1.8, 1.0, 1.0),
+        (2.0, 2.0, 1.0, 1.0),
+        (1.0, 0.5, 1.0, 1.0),
+        (1.3, 0.65, 1.0, 1.0),
+        (1.6, 0.8, 1.0, 1.0),
     ];
     for (lm, em, exposure, contrast) in candidates {
         let (w, h) = (400u32, 300u32);
