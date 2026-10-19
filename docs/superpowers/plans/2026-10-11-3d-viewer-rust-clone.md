@@ -15,7 +15,6 @@
 - **Pinned versions:** eframe 0.36 + egui-wgpu 0.36 MUST match (both 0.36.2 at time of writing). Use `egui_wgpu::wgpu` for ALL wgpu types; NEVER add a standalone `wgpu` dependency.
 - eframe dep: `{ version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }`.
 - **Verification gate (end of every task):** `cargo fmt --check` then `cargo clippy --workspace --all-targets -- -D warnings` then `cargo test --workspace`. All must pass before the commit step.
-- **Git identity:** repo has none configured. Always commit with: `git -c user.name="Steven" -c user.email="steven@local" commit -m "<msg>"`.
 - **No unsafe code.** No `unwrap()` in library crates (viewer-scene, viewer-render) — use `expect("...")` or propagate errors. `unwrap()` acceptable in viewer-app for egui/wgpu state known present.
 - WGSL shaders: `include_str!` + `wgpu::ShaderSource::Wgsl`.
 - Ported constants (exact, from the original app — spec Appendix B): clear color rgb(69,74,80); ground plane opacity 0.4; exposure 0.5 EV; contrast 1.66; bloom weight 0.11; FOV 45°; camera elevation 15°, rotation −90°; shadow map size 512². Theme intensities: 100 = 1.0.
